@@ -361,13 +361,15 @@ if [ "$BOT_MISSING" = false ] && [ "$CLAUDE_OK" = true ]; then
 else
     echo -e "  ${YELLOW}${BOLD}Next steps:${NC}"
     [ "$BOT_MISSING" = true ] && echo -e "  ${DIM}• Edit .env → set BOT_TOKEN${NC}"
-    if [ "$CLAUDE_OK" = false ]; then
-        echo -e ""
-        echo -e "  ${CYAN}• Authenticate Claude (run this manually):${NC}"
-        echo -e "  ${BOLD}    claude auth login${NC}"
-        echo -e ""
-        echo -e "  ${DIM}  Then restart the bot:${NC}"
-        echo -e "  ${DIM}    systemctl restart vps-bot-multi${NC}"
-    fi
 fi
 echo ""
+
+# Claude auth — exec replaces this script process so claude gets full TTY
+if [ "$CLAUDE_OK" = false ] && command -v claude &>/dev/null; then
+    echo -e "  ${CYAN}${BOLD}Authenticating Claude...${NC}"
+    echo -e "  ${DIM}After sign-in, paste the code shown in the browser back here.${NC}"
+    echo -e "  ${DIM}The bot will restart automatically when done.${NC}"
+    echo ""
+    # Use exec so claude inherits the raw TTY (no parent script holding stdin)
+    exec bash -c "claude auth login && systemctl restart vps-bot-multi && echo '' && echo '  ${GREEN}✔ Claude authenticated — bot restarted!'"
+fi
