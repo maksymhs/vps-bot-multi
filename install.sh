@@ -244,13 +244,14 @@ fi
 
 # ADMIN_USER_ID
 if [ -z "$ADMIN_USER_ID" ] || [ "$ADMIN_USER_ID" = "123456789" ]; then
-    echo -e "  ${YELLOW}?${NC} Your Telegram User ID ${DIM}(send /start to @userinfobot)${NC}"
+    echo -e "  ${YELLOW}?${NC} Your Telegram User ID ${DIM}(optional — press Enter to auto-detect)${NC}"
+    echo -e "    ${DIM}The first person to /start the bot becomes admin automatically${NC}"
     read -rp "    → " ADMIN_USER_ID
     if [ -n "$ADMIN_USER_ID" ]; then
         sed -i "s|^ADMIN_USER_ID=.*|ADMIN_USER_ID=${ADMIN_USER_ID}|" "${INSTALL_DIR}/.env"
         echo -e "  ${GREEN}✔${NC} ADMIN_USER_ID → ${ADMIN_USER_ID}"
     else
-        echo -e "  ${YELLOW}!${NC} Skipped — set ADMIN_USER_ID in .env later"
+        echo -e "  ${GREEN}✔${NC} Admin will be auto-assigned to first /start user"
     fi
 else
     echo -e "  ${GREEN}✔${NC} ADMIN_USER_ID → ${ADMIN_USER_ID}"

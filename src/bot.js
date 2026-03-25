@@ -35,6 +35,12 @@ bot.use((ctx, next) => {
     lastName: ctx.from.last_name,
   })
 
+  // Auto-claim admin: first user becomes admin if not configured
+  if (config.needsAdmin) {
+    config.claimAdmin(userId)
+    ctx.reply(`👑 You are now the admin of this bot!\nYour ID (${userId}) has been saved.`).catch(() => {})
+  }
+
   return next()
 })
 

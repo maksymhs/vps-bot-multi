@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
 export const config = {
@@ -31,8 +31,31 @@ export const config = {
   // Telegram Bot (REQUIRED for multi-user)
   get botToken() { return process.env.BOT_TOKEN || undefined },
 
-  // Admin Telegram user ID (optional, for admin commands)
-  get adminUserId() { return process.env.ADMIN_USER_ID ? parseInt(process.env.ADMIN_USER_ID) : null },
+  // Admin Telegram user ID (auto-claimed by first /start if not set)
+  _adminUserId: null,
+  get adminUserId() {
+    if (this._adminUserId) return this._adminUserId
+    return process.env.ADMIN_USER_ID ? parseInt(process.env.ADMIN_USER_ID) : null
+  },
+
+  // Claim admin: set userId as admin and persist to .env
+  claimAdmin(userId) {
+    this._adminUserId = parseInt(userId)
+    process.env.ADMIN_USER_ID = String(userId)
+    // Persist to .env file
+    try {
+      const envPath = join(process.cwd(), '.env')
+      if (existsSync(envPath)) {
+        let content = readFileSync(envPath, 'utf8')
+        if (content.includes('ADMIN_USER_ID=')) {
+          content = content.replace(/^ADMIN_USER_ID=.*$/m, `ADMIN_USER_ID=${userId}`)
+        } else {
+          content += `\nADMIN_USER_ID=${userId}\n`
+        }
+        writeFileSync(envPath, content)
+      }
+    } catch {}
+  },
 
   // Multi-user limits
   get maxAppsPerUser() { return parseInt(process.env.MAX_APPS_PER_USER ?? '3') },
@@ -72,5 +95,10 @@ export const config = {
   // Check if a user is admin
   isAdmin(userId) {
     return this.adminUserId && parseInt(userId) === this.adminUserId
+  },
+
+  // Check if admin is not yet claimed
+  get needsAdmin() {
+    return !this.adminUserId || this.adminUserId === 123456789
   },
 }
