@@ -355,7 +355,7 @@ if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/
 else
     echo -e "  ${YELLOW}?${NC} Authenticate Claude ${DIM}(opens browser for OAuth — uses your Claude subscription)${NC}"
     echo ""
-    claude auth login < /dev/tty
+    claude auth login </dev/tty >/dev/tty 2>/dev/tty
     echo ""
     if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1; then
         echo -e "  ${GREEN}✔${NC} Claude authenticated"
