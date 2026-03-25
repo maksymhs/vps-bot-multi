@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/node-20-339933?logo=node.js&logoColor=white" />
   <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" />
-  <img src="https://img.shields.io/badge/claude-AI-D97706?logo=anthropic&logoColor=white" />
+  <img src="https://img.shields.io/badge/openrouter-AI-D97706?logo=data:image/svg+xml;base64,&logoColor=white" />
   <img src="https://img.shields.io/badge/telegram-bot-26A5E4?logo=telegram&logoColor=white" />
   <img src="https://img.shields.io/badge/license-MIT-green" />
 </p>
@@ -24,7 +24,7 @@
   Template matching → selects best starter template
    │
    ▼
-  Claude Code → generates full project
+  OpenRouter API → generates full project (DeepSeek, Llama, Qwen)
    │
    ▼
   Docker → builds & deploys in user-namespaced container
@@ -53,13 +53,7 @@ git clone https://github.com/maksymhs/vps-bot-multi.git && cd vps-bot-multi && b
 ```
 
 The installer handles Node.js, Docker, Caddy, user setup, and systemd service.
-
-After install, edit `.env` and start:
-
-```bash
-nano /root/vps-bot-multi/.env   # Set BOT_TOKEN, OPENROUTER_API_KEY, DOMAIN, ADMIN_USER_ID
-systemctl start vps-bot-multi
-```
+During install it asks for **BOT_TOKEN**, **OPENROUTER_API_KEY**, **DOMAIN**, and **ADMIN_USER_ID** interactively — no manual `.env` editing needed.
 
 ## Key Differences from vps-bot
 
@@ -149,13 +143,13 @@ IDLE_TIMEOUT=30
                    │
        ┌───────────┼───────────┐
        │           │           │
-   Auto-register  Build    Auto-sleep
-   (user-store)    │       (30 min)
+   Auto-register  Build       Auto-sleep
+   (user-store)    │  (queue)   (30 min)
        │           │           │
        ▼           ▼           ▼
-   /projects/   Claude →   Stop idle
-   u_{userId}/  Docker →   Wake on
-   {app}/       Caddy      HTTP request
+   /projects/   OpenRouter   Stop idle
+   u_{userId}/  → Docker →   Wake on
+   {app}/       Caddy        HTTP request
 ```
 
 ### Data Layout
@@ -190,7 +184,8 @@ vps-bot-multi/
 │       ├── docker-client.js # Dockerode singleton
 │       ├── sleep-manager.js # Auto-sleep + wake proxy (multi-user)
 │       ├── build-state.js  # In-progress build tracking
-│       ├── usage.js        # Claude API usage tracking
+│       ├── build-queue.js  # Concurrency limiter (MAX_CONCURRENT_BUILDS)
+│       ├── usage.js        # API usage tracking
 │       ├── logger.js       # Centralized logging
 │       ├── templates.js    # Template sync, matching & boilerplate
 │       ├── branding.js     # Branding
