@@ -4,16 +4,15 @@ set -e
 
 # --clone mode: clone repo first, then run install from inside it
 if [[ "$1" == "--clone" ]]; then
-  REPO="https://github.com/maksymhs/vps-bot.git"
-  DEST="/root/vps-bot"
+  REPO="https://github.com/maksymhs/vps-bot-multi.git"
+  DEST="/root/vps-bot-multi"
   if [ -d "$DEST" ]; then
     echo "Updating existing installation..."
     cd "$DEST" && git pull --ff-only
   else
     git clone "$REPO" "$DEST"
   fi
-  # Re-exec with stdin from TTY so interactive menus work after curl pipe
-  exec bash "$DEST/install.sh" < /dev/tty
+  exec bash "$DEST/install.sh"
 fi
 
 # Colors
@@ -34,7 +33,7 @@ mkdir -p "$LOGS_DIR"
 LOG_FILE="${LOGS_DIR}/install.log"
 
 # Init log file
-echo "=== VPS-CODE-BOT Install $(date -Iseconds) ===" > "$LOG_FILE"
+echo "=== VPS-BOT-MULTI Install $(date -Iseconds) ===" > "$LOG_FILE"
 
 log() {
     echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
@@ -115,12 +114,11 @@ run_silent_sh() {
 }
 
 echo ""
-echo -e "${CYAN}${BOLD}                       __          __ ${NC}"
-echo -e "${CYAN}${BOLD}  _   ______  _____   / /_  ____  / /_${NC}"
-echo -e "${CYAN}${BOLD}  | | / / __ \\/ ___/  / __ \\/ __ \\/ __/${NC}"
-echo -e "${CYAN}${BOLD}  | |/ / /_/ (__  )  / /_/ / /_/ / /_ ${NC}"
-echo -e "${CYAN}${BOLD}  |___/ .___/____/  /_.___/\\____/\\__/ ${NC}"
-echo -e "${CYAN}${BOLD}     /_/          ${NC}${DIM}by maksymhs${NC}"
+echo -e "${CYAN}${BOLD}  _   ______  _____   / /_  ____  / /_   __ _  __ __  / / /_(_)${NC}"
+echo -e "${CYAN}${BOLD}  | | / / __ \\/ ___/  / __ \\/ __ \\/ __/  /  ' \\/ // / / / __/ /${NC}"
+echo -e "${CYAN}${BOLD}  | |/ / /_/ (__  )  / /_/ / /_/ / /_   /_/_/_/\\_,_/ /_/\\__/_/ ${NC}"
+echo -e "${CYAN}${BOLD}  |___/ .___/____/  /_.___/\\____/\\__/                           ${NC}"
+echo -e "${CYAN}${BOLD}     /_/          ${NC}${DIM}multi-user · by maksymhs${NC}"
 echo ""
 
 # Detect OS
@@ -152,7 +150,7 @@ else
     run_silent_sh "Docker" "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sh /tmp/get-docker.sh && rm /tmp/get-docker.sh"
 fi
 
-# Caddy
+# Caddy (only needed for domain mode, but install always)
 if command -v caddy &> /dev/null; then
     echo -e "  ${GREEN}✔${NC} Caddy $(caddy version 2>/dev/null | awk '{print $1}' || echo '')"
 else
@@ -172,32 +170,7 @@ else
     CLAUDE_CLI=$(command -v claude 2>/dev/null || echo "claude")
 fi
 
-# Code-Server
-if command -v code-server &> /dev/null; then
-    echo -e "  ${GREEN}✔${NC} Code-Server"
-else
-    run_silent_sh "Code-Server" "curl -fsSL https://code-server.dev/install.sh | sh"
-fi
-
-# Code-Server extensions & settings
-if command -v code-server &> /dev/null; then
-    run_silent "Claude Code extension" code-server --install-extension anthropic.claude-code
-    # Dark theme + settings
-    CS_SETTINGS_DIR="$HOME/.local/share/code-server/User"
-    mkdir -p "$CS_SETTINGS_DIR"
-    if [ ! -f "$CS_SETTINGS_DIR/settings.json" ]; then
-        cat > "$CS_SETTINGS_DIR/settings.json" << 'SETTINGS'
-{
-    "workbench.colorTheme": "Default Dark Modern",
-    "editor.fontSize": 14,
-    "editor.minimap.enabled": false,
-    "workbench.startupEditor": "none"
-}
-SETTINGS
-    fi
-fi
-
-# vpsbot user
+# vpsbot user (for Claude Code execution)
 VPSBOT_USER="vpsbot"
 VPSBOT_HOME="/home/${VPSBOT_USER}"
 if id "$VPSBOT_USER" &>/dev/null; then
@@ -214,13 +187,17 @@ echo -e "  ${CYAN}${BOLD}Setup${NC}"
 echo -e "  ${DIM}──────────────────────────────────────────${NC}"
 run_silent "npm install" bash -c "cd '$INSTALL_DIR' && npm install"
 
-cd "$INSTALL_DIR"
-node src/setup.js --claude-cli "$CLAUDE_CLI" --os "$OS" 2>/dev/null || true
+# Generate .env if missing
+if [ ! -f "${INSTALL_DIR}/.env" ]; then
+    cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
+    echo -e "  ${YELLOW}!${NC} Created .env from template — ${BOLD}edit it before starting the bot${NC}"
+    echo -e "    ${DIM}Required: BOT_TOKEN, DOMAIN (or IP_ADDRESS), ADMIN_USER_ID${NC}"
+else
+    echo -e "  ${GREEN}✔${NC} .env exists"
+fi
 
 # Source .env
-if [ -f "${INSTALL_DIR}/.env" ]; then
-    source "${INSTALL_DIR}/.env" 2>/dev/null || true
-fi
+source "${INSTALL_DIR}/.env" 2>/dev/null || true
 
 echo ""
 echo -e "  ${CYAN}${BOLD}Services${NC}"
@@ -237,7 +214,6 @@ if ! docker network ls --format '{{.Name}}' | grep -qx 'caddy'; then
 fi
 
 # Network setup
-CS_PORT="${CODE_SERVER_PORT:-8080}"
 NODE_BIN=$(which node)
 PROJECTS_DIR="${PROJECTS_DIR:-/home/vpsbot/projects}"
 mkdir -p "$PROJECTS_DIR"
@@ -248,7 +224,7 @@ if [ -n "$DOMAIN" ]; then
     systemctl disable caddy 2>/dev/null || true
     docker rm -f caddy-proxy 2>/dev/null || true
 
-    run_silent "Caddy proxy → ${DOMAIN}" docker run -d \
+    run_silent "Caddy proxy → *.${DOMAIN}" docker run -d \
         --name caddy-proxy \
         --restart unless-stopped \
         --network caddy \
@@ -256,8 +232,6 @@ if [ -n "$DOMAIN" ]; then
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v caddy_data:/data \
         -l "caddy.admin=0.0.0.0:2019" \
-        -l "caddy_0=code.${DOMAIN}" \
-        -l "caddy_0.reverse_proxy=host.docker.internal:${CS_PORT}" \
         --add-host host.docker.internal:host-gateway \
         lucaslorentz/caddy-docker-proxy:ci-alpine
 else
@@ -265,57 +239,13 @@ else
     systemctl stop caddy 2>/dev/null || true
     systemctl disable caddy 2>/dev/null || true
     docker rm -f caddy-proxy 2>/dev/null || true
+    echo -e "  ${YELLOW}!${NC} No DOMAIN set — apps will use http://IP:PORT"
 fi
 
-# Code-Server service
-if command -v code-server &> /dev/null; then
-    CS_PASS="${CODE_SERVER_PASSWORD:-changeme}"
-    # Domain mode: localhost only (Caddy proxies). IP mode: public.
-    CS_BIND="0.0.0.0:${CS_PORT}"
-    [ -n "$DOMAIN" ] && CS_BIND="127.0.0.1:${CS_PORT}"
-
-    mkdir -p "$HOME/.config/code-server"
-    cat > "$HOME/.config/code-server/config.yaml" << EOF
-bind-addr: ${CS_BIND}
-auth: password
-password: ${CS_PASS}
-cert: false
-EOF
-
-    cat > /etc/systemd/system/code-server.service << EOF
+# Bot systemd service
+cat > /etc/systemd/system/vps-bot-multi.service << EOF
 [Unit]
-Description=Code Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$(which code-server) --disable-telemetry ${PROJECTS_DIR}
-Restart=always
-RestartSec=5
-Environment=HOME=$HOME
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload > /dev/null 2>&1
-    systemctl enable code-server > /dev/null 2>&1
-    systemctl restart code-server > /dev/null 2>&1
-    sleep 1
-    if systemctl is-active --quiet code-server; then
-        IP_DISPLAY=$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')
-        if [ -n "$DOMAIN" ]; then
-            echo -e "  ${GREEN}✔${NC} Code-Server → ${CYAN}https://code.${DOMAIN}${NC}"
-        else
-            echo -e "  ${GREEN}✔${NC} Code-Server → ${CYAN}http://${IP_DISPLAY}:${CS_PORT}${NC}"
-        fi
-    fi
-fi
-
-# Bot service
-cat > /etc/systemd/system/vps-bot-telegram.service << EOF
-[Unit]
-Description=VPS-CODE-BOT Telegram Bot
+Description=VPS-BOT-MULTI Telegram Bot
 After=network.target docker.service
 
 [Service]
@@ -332,14 +262,25 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload > /dev/null 2>&1
+systemctl enable vps-bot-multi > /dev/null 2>&1
 
 chown -R "${VPSBOT_USER}:${VPSBOT_USER}" "$PROJECTS_DIR" 2>/dev/null || true
+
+# Start bot if BOT_TOKEN is set
+if [ -n "$BOT_TOKEN" ] && [ "$BOT_TOKEN" != "your_telegram_bot_token" ]; then
+    run_silent "Starting bot" bash -c "systemctl restart vps-bot-multi"
+    echo -e "  ${GREEN}✔${NC} Bot running as systemd service"
+else
+    echo -e "  ${YELLOW}!${NC} BOT_TOKEN not set — edit .env and run: ${CYAN}systemctl start vps-bot-multi${NC}"
+fi
 
 echo ""
 echo -e "  ${GREEN}${BOLD}✔ Installation complete${NC}"
 echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
 echo ""
-
-# Launch main menu
-cd "$INSTALL_DIR"
-exec node src/cli-home.js
+echo -e "  ${CYAN}${BOLD}Next steps:${NC}"
+echo -e "  ${DIM}1. Edit .env → set BOT_TOKEN, DOMAIN, ADMIN_USER_ID${NC}"
+echo -e "  ${DIM}2. Authenticate Claude: su - vpsbot -c 'claude auth login'${NC}"
+echo -e "  ${DIM}3. Start: systemctl start vps-bot-multi${NC}"
+echo -e "  ${DIM}4. Check: systemctl status vps-bot-multi${NC}"
+echo ""

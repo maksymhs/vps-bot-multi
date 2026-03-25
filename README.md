@@ -40,13 +40,26 @@
 
 ## Quick Start
 
+One-line install (Ubuntu/Debian VPS):
+
 ```bash
-git clone https://github.com/maksymhs/vps-bot-multi.git
-cd vps-bot-multi
-cp .env.example .env
-# Edit .env with your BOT_TOKEN, DOMAIN, CLAUDE_CLI, ADMIN_USER_ID
-npm install
-npm start
+curl -sL https://raw.githubusercontent.com/maksymhs/vps-bot-multi/main/install.sh | bash -s -- --clone
+```
+
+Or manually:
+
+```bash
+git clone https://github.com/maksymhs/vps-bot-multi.git && cd vps-bot-multi && bash install.sh
+```
+
+The installer handles Node.js, Docker, Caddy, Claude Code CLI, user setup, and systemd service.
+
+After install, edit `.env` and start:
+
+```bash
+nano /root/vps-bot-multi/.env   # Set BOT_TOKEN, DOMAIN, ADMIN_USER_ID
+su - vpsbot -c 'claude auth login'
+systemctl start vps-bot-multi
 ```
 
 ## Key Differences from vps-bot
