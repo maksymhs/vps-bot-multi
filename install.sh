@@ -212,6 +212,20 @@ else
     echo -e "  ${GREEN}✔${NC} BOT_TOKEN"
 fi
 
+# ANTHROPIC_API_KEY (primary AI)
+if [ -z "$ANTHROPIC_API_KEY" ] || [ "$ANTHROPIC_API_KEY" = "sk-ant-your-key-here" ]; then
+    echo -e "  ${YELLOW}?${NC} Anthropic API Key ${DIM}(claude.ai subscription → console.anthropic.com/settings/keys)${NC}"
+    read -rp "    → " ANTHROPIC_API_KEY
+    if [ -n "$ANTHROPIC_API_KEY" ]; then
+        sed -i "s|^# ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}|" "${INSTALL_DIR}/.env"
+        echo -e "  ${GREEN}✔${NC} ANTHROPIC_API_KEY saved"
+    else
+        echo -e "  ${YELLOW}!${NC} Skipped — set ANTHROPIC_API_KEY in .env later"
+    fi
+else
+    echo -e "  ${GREEN}✔${NC} ANTHROPIC_API_KEY"
+fi
+
 # OPENROUTER_API_KEY (optional fallback)
 if [ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-here" ]; then
     echo -e "  ${YELLOW}?${NC} OpenRouter API Key ${DIM}(optional — fallback when Claude is rate-limited, Enter to skip)${NC}"
@@ -220,7 +234,7 @@ if [ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-
         sed -i "s|^# OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${OPENROUTER_API_KEY}|" "${INSTALL_DIR}/.env"
         echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY saved"
     else
-        echo -e "  ${GREEN}✔${NC} Skipped — Claude will be used exclusively"
+        echo -e "  ${GREEN}✔${NC} Skipped"
     fi
 else
     echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY (fallback)"
