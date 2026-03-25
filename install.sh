@@ -162,6 +162,13 @@ else
         apt-get update && apt-get install -y caddy"
 fi
 
+# Claude CLI
+if command -v claude &> /dev/null; then
+    echo -e "  ${GREEN}✔${NC} Claude CLI $(claude --version 2>/dev/null | head -1)"
+else
+    run_silent "Claude CLI" npm install -g @anthropic-ai/claude-code
+fi
+
 # vpsbot user (for project file ownership)
 VPSBOT_USER="vpsbot"
 VPSBOT_HOME="/home/${VPSBOT_USER}"
@@ -205,18 +212,18 @@ else
     echo -e "  ${GREEN}✔${NC} BOT_TOKEN"
 fi
 
-# OPENROUTER_API_KEY
+# OPENROUTER_API_KEY (optional fallback)
 if [ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-here" ]; then
-    echo -e "  ${YELLOW}?${NC} OpenRouter API Key ${DIM}(from openrouter.ai/keys)${NC}"
+    echo -e "  ${YELLOW}?${NC} OpenRouter API Key ${DIM}(optional — fallback when Claude is rate-limited, Enter to skip)${NC}"
     read -rp "    → " OPENROUTER_API_KEY
     if [ -n "$OPENROUTER_API_KEY" ]; then
-        sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${OPENROUTER_API_KEY}|" "${INSTALL_DIR}/.env"
+        sed -i "s|^# OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${OPENROUTER_API_KEY}|" "${INSTALL_DIR}/.env"
         echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY saved"
     else
-        echo -e "  ${YELLOW}!${NC} Skipped — set OPENROUTER_API_KEY in .env later"
+        echo -e "  ${GREEN}✔${NC} Skipped — Claude will be used exclusively"
     fi
 else
-    echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY"
+    echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY (fallback)"
 fi
 
 # DOMAIN or IP
@@ -338,20 +345,40 @@ fi
 echo ""
 echo -e "  ${GREEN}${BOLD}✔ Installation complete${NC}"
 echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
+
+# Claude auth — do this last since it opens a browser
 echo ""
-
-# Show next steps only if something is missing
-MISSING=""
-[ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "your_telegram_bot_token" ] && MISSING="${MISSING} BOT_TOKEN"
-[ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-here" ] && MISSING="${MISSING} OPENROUTER_API_KEY"
-source "${INSTALL_DIR}/.env" 2>/dev/null || true
-
-if [ -n "$MISSING" ]; then
-    echo -e "  ${YELLOW}${BOLD}Still needed:${NC}"
-    echo -e "  ${DIM}1. Edit .env → set${MISSING}${NC}"
-    echo -e "  ${DIM}2. systemctl restart vps-bot-multi${NC}"
+echo -e "  ${CYAN}${BOLD}Claude Authentication${NC}"
+echo -e "  ${DIM}──────────────────────────────────────────${NC}"
+if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1; then
+    echo -e "  ${GREEN}✔${NC} Claude already authenticated"
 else
-    echo -e "  ${GREEN}${BOLD}🚀 Bot is running! Open Telegram and send /start${NC}"
+    echo -e "  ${YELLOW}?${NC} Authenticate Claude ${DIM}(opens browser for OAuth — uses your Claude subscription)${NC}"
+    echo ""
+    claude auth login
+    echo ""
+    if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1; then
+        echo -e "  ${GREEN}✔${NC} Claude authenticated"
+        systemctl restart vps-bot-multi > /dev/null 2>&1 || true
+    else
+        echo -e "  ${YELLOW}!${NC} Skipped — run ${CYAN}claude auth login${NC} then ${CYAN}systemctl restart vps-bot-multi${NC}"
+    fi
+fi
+
+echo ""
+source "${INSTALL_DIR}/.env" 2>/dev/null || true
+CLAUDE_OK=false
+command -v claude &>/dev/null && claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1 && CLAUDE_OK=true
+
+BOT_MISSING=false
+{ [ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "your_telegram_bot_token" ]; } && BOT_MISSING=true
+
+if [ "$BOT_MISSING" = false ] && [ "$CLAUDE_OK" = true ]; then
+    echo -e "  ${GREEN}${BOLD}Bot is running! Open Telegram and send /start${NC}"
     echo -e "  ${DIM}Manage: systemctl status vps-bot-multi${NC}"
+else
+    echo -e "  ${YELLOW}${BOLD}Still needed:${NC}"
+    [ "$BOT_MISSING" = true ] && echo -e "  ${DIM}• Edit .env → set BOT_TOKEN, then: systemctl restart vps-bot-multi${NC}"
+    [ "$CLAUDE_OK" = false ] && echo -e "  ${DIM}• Run: ${CYAN}claude auth login${NC}  then: ${CYAN}systemctl restart vps-bot-multi${NC}"
 fi
 echo ""

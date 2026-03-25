@@ -81,15 +81,23 @@ async function main() {
   // Show current config
   console.log('')
   console.log(`  ${C.bold}Current config:${C.reset}`)
+  let claudeCliStatus
+  try {
+    const ver = execSync('claude --version', { encoding: 'utf8', stdio: 'pipe' }).trim()
+    claudeCliStatus = `✔ ${ver}`
+  } catch {
+    claudeCliStatus = '✘ not found'
+  }
+
   const keys = [
+    ['claude CLI (primary)', claudeCliStatus],
     ['BOT_TOKEN', env.BOT_TOKEN ? '✔ set' : '✘ missing'],
-    ['OPENROUTER_API_KEY', env.OPENROUTER_API_KEY && env.OPENROUTER_API_KEY !== 'sk-or-v1-your-key-here' ? '✔ set' : '✘ missing'],
+    ['OPENROUTER_API_KEY (fallback)', env.OPENROUTER_API_KEY && env.OPENROUTER_API_KEY !== 'sk-or-v1-your-key-here' ? '✔ set' : '✘ not set'],
     ['DOMAIN', env.DOMAIN && env.DOMAIN !== 'your-domain.com' ? env.DOMAIN : (env.IP_ADDRESS || '✘ not set')],
     ['ADMIN_USER_ID', env.ADMIN_USER_ID && env.ADMIN_USER_ID !== '123456789' ? env.ADMIN_USER_ID : 'auto-detect'],
     ['MAX_APPS_PER_USER', env.MAX_APPS_PER_USER || '3'],
     ['MAX_CONCURRENT_BUILDS', env.MAX_CONCURRENT_BUILDS || '2'],
     ['IDLE_TIMEOUT', env.IDLE_TIMEOUT || '30'],
-    ['DEFAULT_MODEL', env.DEFAULT_MODEL || 'deepseek/deepseek-chat-v3-0324'],
   ]
 
   for (const [key, val] of keys) {
@@ -102,13 +110,12 @@ async function main() {
   // Menu
   console.log(`\n  ${C.bold}What to edit?${C.reset}`)
   console.log(`  ${C.dim}1${C.reset} BOT_TOKEN`)
-  console.log(`  ${C.dim}2${C.reset} OPENROUTER_API_KEY`)
+  console.log(`  ${C.dim}2${C.reset} OPENROUTER_API_KEY ${C.dim}(fallback when Claude is rate-limited)${C.reset}`)
   console.log(`  ${C.dim}3${C.reset} DOMAIN / IP`)
   console.log(`  ${C.dim}4${C.reset} ADMIN_USER_ID`)
   console.log(`  ${C.dim}5${C.reset} MAX_APPS_PER_USER`)
   console.log(`  ${C.dim}6${C.reset} MAX_CONCURRENT_BUILDS`)
   console.log(`  ${C.dim}7${C.reset} IDLE_TIMEOUT`)
-  console.log(`  ${C.dim}8${C.reset} DEFAULT_MODEL`)
   console.log(`  ${C.dim}r${C.reset} Restart bot`)
   console.log(`  ${C.dim}s${C.reset} Stop bot`)
   console.log(`  ${C.dim}q${C.reset} Quit`)
@@ -123,7 +130,7 @@ async function main() {
       break
     }
     case '2': {
-      const val = await ask(rl, 'OPENROUTER_API_KEY', env.OPENROUTER_API_KEY || '')
+      const val = await ask(rl, 'OPENROUTER_API_KEY (fallback)', env.OPENROUTER_API_KEY || '')
       if (val) { writeEnvKey('OPENROUTER_API_KEY', val); console.log(`  ${C.green}✔${C.reset} Saved`) }
       break
     }
@@ -158,11 +165,6 @@ async function main() {
       writeEnvKey('IDLE_TIMEOUT', val); console.log(`  ${C.green}✔${C.reset} Saved`)
       break
     }
-    case '8': {
-      const val = await ask(rl, 'DEFAULT_MODEL', env.DEFAULT_MODEL || 'deepseek/deepseek-chat-v3-0324')
-      writeEnvKey('DEFAULT_MODEL', val); console.log(`  ${C.green}✔${C.reset} Saved`)
-      break
-    }
     case 'r': {
       console.log(`  ${C.cyan}⟳${C.reset} Restarting bot...`)
       try {
@@ -189,7 +191,7 @@ async function main() {
   }
 
   // Ask to restart if config changed
-  if (['1','2','3','4','5','6','7','8'].includes(choice) && running) {
+  if (['1','2','3','4','5','6','7'].includes(choice) && running) {
     const restart = await ask(rl, 'Restart bot to apply changes? (y/N)', 'n')
     if (restart.toLowerCase() === 'y') {
       try {

@@ -267,15 +267,14 @@ function getExistingFiles(dir) {
   }
 }
 
-async function runOpenRouter(dir, name, description, onProgress = null, errorContext = null, model = null, mode = 'new', templateInfo = null) {
-  const actualModel = model || config.defaultModel
+async function generateCode(dir, name, description, onProgress = null, errorContext = null, _model = null, mode = 'new', templateInfo = null) {
   const existingFiles = (mode === 'patch') ? getExistingFiles(dir) : []
   const prompt = (mode === 'patch')
     ? buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
     : buildClaudePrompt(name, description, errorContext, templateInfo)
 
   const startTime = Date.now()
-  log.build(name, `=== ${mode.toUpperCase()} BUILD START ===`, `model=${actualModel}`)
+  log.build(name, `=== ${mode.toUpperCase()} BUILD START ===`)
   log.build(name, 'Prompt:', prompt)
 
   if (onProgress) await onProgress('🧠 Generating code...')
@@ -288,37 +287,78 @@ file contents here
 
 Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${config.openrouterKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://vps-bot-multi.local',
-      'X-Title': 'VPS-Bot-Multi',
-    },
-    body: JSON.stringify({
-      model: actualModel,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt },
-      ],
-      max_tokens: 16384,
-    }),
-  })
+  let content = null
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`)
+  // Try Claude CLI first (uses ~/.claude subscription auth, no API key needed)
+  try {
+    log.build(name, 'Using Claude CLI (claude-haiku-4-5-20251001)')
+    content = await new Promise((resolve, reject) => {
+      execFile('claude', [
+        '-p', prompt,
+        '--model', 'claude-haiku-4-5-20251001',
+        '--output-format', 'json',
+        '--system-prompt', systemPrompt,
+      ], { maxBuffer: 20 * 1024 * 1024, timeout: 180000 }, (err, stdout, stderr) => {
+        if (err) return reject(Object.assign(err, { stderr: stderr || '' }))
+        try {
+          const data = JSON.parse(stdout)
+          resolve(data.result ?? stdout)
+        } catch {
+          resolve(stdout)
+        }
+      })
+    })
+    log.build(name, 'Claude CLI response length:', content?.length)
+  } catch (err) {
+    const errText = (err.message + (err.stderr || '')).toLowerCase()
+    const isRateLimit = errText.includes('rate_limit') || errText.includes('overloaded') || errText.includes('429')
+    const isUnavailable = errText.includes('not found') || errText.includes('enoent') || errText.includes('command not found')
+
+    if ((isRateLimit || isUnavailable) && config.openrouterKey) {
+      const reason = isUnavailable ? 'Claude CLI no disponible' : 'Claude saturado'
+      log.build(name, `${reason}, fallback → OpenRouter DeepSeek`)
+      if (onProgress) await onProgress(`⚠️ ${reason} — usando DeepSeek como alternativa...`)
+    } else {
+      throw err
+    }
   }
 
-  const data = await response.json()
-  const content = data.choices?.[0]?.message?.content
-
+  // Fallback: OpenRouter DeepSeek
   if (!content) {
-    throw new Error('OpenRouter returned no content')
-  }
+    if (!config.openrouterKey) throw new Error('No AI provider available (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY)')
 
-  log.build(name, 'OpenRouter response length:', content.length)
+    const fallbackModel = 'deepseek/deepseek-chat-v3-0324'
+    log.build(name, `Using OpenRouter fallback: ${fallbackModel}`)
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.openrouterKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://vps-bot-multi.local',
+        'X-Title': 'VPS-Bot-Multi',
+      },
+      body: JSON.stringify({
+        model: fallbackModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: 16384,
+      }),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`)
+    }
+
+    const data = await response.json()
+    content = data.choices?.[0]?.message?.content
+
+    if (!content) throw new Error('OpenRouter returned no content')
+    log.build(name, 'OpenRouter response length:', content.length)
+  }
 
   // Parse structured file output: --- FILE: path --- ... --- END FILE ---
   let filesWritten = 0
@@ -571,13 +611,10 @@ async function pollHealth(ip, port, timeoutMs = 40_000, onProgress = null) {
   return false
 }
 
-async function buildAndVerify(dir, userId, name, description, onStatus, errorContext = null, model = null, mode = 'new') {
-  const actualModel = model || config.defaultModel
-  const modelShort = actualModel.split('/').pop()
-
+async function buildAndVerify(dir, userId, name, description, onStatus, errorContext = null, _model = null, mode = 'new') {
   const slug = userStore.getUserSlug(userId)
   const logName = `${slug}-${name}`
-  log.info(`[${logName}] build start`, `model=${actualModel} dir=${dir} mode=${mode}`)
+  log.info(`[${logName}] build start`, `dir=${dir} mode=${mode}`)
 
   // Template flow: sync repo, match template+components, copy files (only for new/full builds)
   let templateInfo = null
@@ -609,7 +646,7 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   }
 
   try {
-    await runOpenRouter(dir, name, description, onStatus, errorContext, actualModel, mode, templateInfo)
+    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
     log.info(`[${logName}] code generated`)
   } catch (err) {
     log.error(`[${logName}] code generation failed`, err.message)

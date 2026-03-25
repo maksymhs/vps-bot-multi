@@ -2,7 +2,7 @@ import 'dotenv/config'
 import { Telegraf } from 'telegraf'
 import { execFile, execSync } from 'child_process'
 import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl } from './commands/projects.js'
-import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild, showModelSelect } from './commands/menu.js'
+import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild } from './commands/menu.js'
 import { userStore } from './lib/user-store.js'
 import { getDocker } from './lib/docker-client.js'
 import { buildingSet } from './lib/build-state.js'
@@ -104,8 +104,26 @@ bot.on('text', async (ctx, next) => {
       ? `${project.description}\n\nRequested changes: ${input}`
       : input
 
-    pendingRebuild.set(ctx.chat.id, { name, mode, description, step: 'model' })
-    return showModelSelect(ctx, 'rbm', name)
+    pendingRebuild.delete(ctx.chat.id)
+
+    const slug = userStore.getUserSlug(userId)
+    const buildKey = `${slug}-${name}`
+    if (buildingSet.has(buildKey)) return ctx.reply('Already building...')
+    buildingSet.add(buildKey)
+
+    const qs = getQueueStatus()
+    if (qs.waiting > 0) {
+      await ctx.reply(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
+    }
+
+    enqueueBuild(buildKey, () => deployRebuild(ctx, name, description, null, mode))
+      .then(ok => { if (ok) showProject(ctx, name).catch(() => {}) })
+      .catch(err => {
+        console.error('Rebuild error:', err)
+        ctx.reply(`❌ *${name}* — Rebuild failed: ${(err.message || err).toString().slice(0, 300)}`, { parse_mode: 'Markdown' }).catch(() => {})
+      })
+      .finally(() => buildingSet.delete(buildKey))
+    return
   }
 
   // New project flow
@@ -129,8 +147,25 @@ bot.on('text', async (ctx, next) => {
   if (state.step === 'desc') {
     const { name } = state
     const description = ctx.message.text.trim()
-    pendingNew.set(ctx.chat.id, { step: 'model', name, description })
-    return showModelSelect(ctx, 'nbm', name)
+    pendingNew.delete(ctx.chat.id)
+
+    const slug = userStore.getUserSlug(userId)
+    const buildKey = `${slug}-${name}`
+    if (buildingSet.has(buildKey)) return ctx.reply('Already building...')
+    buildingSet.add(buildKey)
+
+    const qs = getQueueStatus()
+    if (qs.waiting > 0) {
+      await ctx.reply(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
+    }
+
+    enqueueBuild(buildKey, () => deployNew(ctx, name, description, null))
+      .catch(err => {
+        console.error('Deploy error:', err)
+        ctx.reply(`❌ *${name}* — Build failed: ${(err.message || err).toString().slice(0, 300)}`, { parse_mode: 'Markdown' }).catch(() => {})
+      })
+      .finally(() => buildingSet.delete(buildKey))
+    return
   }
 
 })
@@ -411,82 +446,6 @@ bot.action(/^del_ok:(.+)$/, async (ctx) => {
   }
 })
 
-// Model selection — new project
-bot.action(/^nbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
-  await answer(ctx)
-  const userId = ctx.from?.id
-  const modelMap = {
-    deepseek: 'deepseek/deepseek-chat-v3-0324',
-    llama: 'meta-llama/llama-4-maverick',
-    qwen: 'qwen/qwen-2.5-coder-32b-instruct',
-  }
-  const model = modelMap[ctx.match[1]] || config.defaultModel
-  const name = ctx.match[2]
-  const state = pendingNew.get(ctx.chat.id)
-  if (!state || state.step !== 'model' || state.name !== name) return ctx.editMessageText('Session expired. Use /menu.')
-  pendingNew.delete(ctx.chat.id)
-
-  const slug = userStore.getUserSlug(userId)
-  const buildKey = `${slug}-${name}`
-  if (buildingSet.has(buildKey)) return ctx.answerCbQuery('Already building...', { show_alert: true })
-  buildingSet.add(buildKey)
-
-  // Enqueue build to limit concurrency
-  const qs = getQueueStatus()
-  if (qs.waiting > 0) {
-    await ctx.editMessageText(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
-  }
-
-  enqueueBuild(buildKey, () => deployNew(ctx, name, state.description, model))
-    .catch(err => {
-      console.error('Deploy error:', err)
-      ctx.reply(`❌ *${name}* — Build failed: ${(err.message || err).toString().slice(0, 300)}`, { parse_mode: 'Markdown' }).catch(() => {})
-    })
-    .finally(() => buildingSet.delete(buildKey))
-})
-
-// Model selection — rebuild
-bot.action(/^rbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
-  await answer(ctx)
-  const userId = ctx.from?.id
-  const modelMap = {
-    deepseek: 'deepseek/deepseek-chat-v3-0324',
-    llama: 'meta-llama/llama-4-maverick',
-    qwen: 'qwen/qwen-2.5-coder-32b-instruct',
-  }
-  const model = modelMap[ctx.match[1]] || config.defaultModel
-  const name = ctx.match[2]
-  const state = pendingRebuild.get(ctx.chat.id)
-  if (!state || state.step !== 'model' || state.name !== name) {
-    pendingRebuild.delete(ctx.chat.id)
-    return ctx.editMessageText('Session expired. Use /menu.')
-  }
-  pendingRebuild.delete(ctx.chat.id)
-
-  const project = userStore.getProject(userId, name)
-  if (!project) return ctx.editMessageText(`Project "${name}" not found.`)
-
-  const slug = userStore.getUserSlug(userId)
-  const buildKey = `${slug}-${name}`
-  if (buildingSet.has(buildKey)) return ctx.answerCbQuery('Already building...', { show_alert: true })
-  buildingSet.add(buildKey)
-
-  // Enqueue build to limit concurrency
-  const qs = getQueueStatus()
-  if (qs.waiting > 0) {
-    await ctx.editMessageText(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
-  }
-
-  enqueueBuild(buildKey, () => deployRebuild(ctx, name, state.description, model, state.mode))
-    .then(ok => {
-      if (ok) showProject(ctx, name).catch(() => {})
-    })
-    .catch(err => {
-      console.error('Rebuild error:', err)
-      ctx.reply(`❌ *${name}* — Rebuild failed: ${(err.message || err).toString().slice(0, 300)}`, { parse_mode: 'Markdown' }).catch(() => {})
-    })
-    .finally(() => buildingSet.delete(buildKey))
-})
 
 // ── Launch ─────────────────────────────────────────────────────────────────
 
@@ -501,6 +460,20 @@ bot.launch()
 reconcileSleepState().catch(err => console.error('Reconcile error:', err.message))
 startSleepManager()
 console.log(getBanner())
+
+// Check Claude CLI availability at startup
+try {
+  execSync('claude --version', { stdio: 'pipe' })
+  console.log(chalk.green('✔ Claude CLI detected — primary code generation ready'))
+} catch {
+  if (config.openrouterKey) {
+    console.log(chalk.yellow('⚠ Claude CLI not found — using OpenRouter DeepSeek as primary'))
+  } else {
+    console.log(chalk.red('✘ Claude CLI not found and no OPENROUTER_API_KEY set — code generation unavailable!'))
+    console.log(chalk.dim('  Install Claude: https://claude.ai/download  or set OPENROUTER_API_KEY in .env'))
+  }
+}
+
 console.log(chalk.green('Bot started successfully.\n'))
 
 process.once('SIGINT', () => { stopSleepManager(); bot.stop('SIGINT') })

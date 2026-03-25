@@ -60,9 +60,8 @@ export const config = {
   // Multi-user limits
   get maxAppsPerUser() { return parseInt(process.env.MAX_APPS_PER_USER ?? '3') },
 
-  // OpenRouter API (REQUIRED for code generation)
+  // OpenRouter API — fallback when Claude CLI is rate-limited or unavailable
   get openrouterKey() { return process.env.OPENROUTER_API_KEY || undefined },
-  get defaultModel() { return process.env.DEFAULT_MODEL ?? 'deepseek/deepseek-chat-v3-0324' },
 
   // Build concurrency
   get maxConcurrentBuilds() { return parseInt(process.env.MAX_CONCURRENT_BUILDS ?? '2') },
@@ -82,7 +81,7 @@ export const config = {
 
   // Verify setup is complete
   isSetupComplete() {
-    return !!(this.botToken && this.openrouterKey && (this.domain || this.ipAddress))
+    return !!(this.botToken && (this.domain || this.ipAddress))
   },
 
   // Get network type
