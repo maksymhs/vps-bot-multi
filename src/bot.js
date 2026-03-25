@@ -7,6 +7,7 @@ import { userStore } from './lib/user-store.js'
 import { getDocker } from './lib/docker-client.js'
 import { buildingSet } from './lib/build-state.js'
 import { config } from './lib/config.js'
+import { enqueueBuild, getQueueStatus } from './lib/build-queue.js'
 import { getBanner } from './lib/branding.js'
 import { startSleepManager, stopSleepManager, reconcileSleepState } from './lib/sleep-manager.js'
 import { existsSync, rmSync } from 'fs'
@@ -298,15 +299,15 @@ bot.action(/^del_ok:(.+)$/, async (ctx) => {
 })
 
 // Model selection — new project
-bot.action(/^nbm:(sonnet|opus|haiku):(.+)$/, async (ctx) => {
+bot.action(/^nbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
   await answer(ctx)
   const userId = ctx.from?.id
   const modelMap = {
-    sonnet: 'claude-sonnet-4-6',
-    opus: 'claude-opus-4-6',
-    haiku: 'claude-haiku-4-5-20251001',
+    deepseek: 'deepseek/deepseek-chat-v3-0324',
+    llama: 'meta-llama/llama-4-maverick',
+    qwen: 'qwen/qwen-2.5-coder-32b-instruct',
   }
-  const model = modelMap[ctx.match[1]] || 'claude-sonnet-4-6'
+  const model = modelMap[ctx.match[1]] || config.defaultModel
   const name = ctx.match[2]
   const state = pendingNew.get(ctx.chat.id)
   if (!state || state.step !== 'model' || state.name !== name) return ctx.editMessageText('Session expired. Use /menu.')
@@ -316,22 +317,27 @@ bot.action(/^nbm:(sonnet|opus|haiku):(.+)$/, async (ctx) => {
   if (buildingSet.has(buildKey)) return ctx.answerCbQuery('Already building...', { show_alert: true })
   buildingSet.add(buildKey)
 
-  // Start deploy in background to avoid timeout
-  deployNew(ctx, name, state.description, model)
+  // Enqueue build to limit concurrency
+  const qs = getQueueStatus()
+  if (qs.waiting > 0) {
+    await ctx.editMessageText(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
+  }
+
+  enqueueBuild(buildKey, () => deployNew(ctx, name, state.description, model))
     .catch(err => console.error('Deploy error:', err))
     .finally(() => buildingSet.delete(buildKey))
 })
 
 // Model selection — rebuild
-bot.action(/^rbm:(sonnet|opus|haiku):(.+)$/, async (ctx) => {
+bot.action(/^rbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
   await answer(ctx)
   const userId = ctx.from?.id
   const modelMap = {
-    sonnet: 'claude-sonnet-4-6',
-    opus: 'claude-opus-4-6',
-    haiku: 'claude-haiku-4-5-20251001',
+    deepseek: 'deepseek/deepseek-chat-v3-0324',
+    llama: 'meta-llama/llama-4-maverick',
+    qwen: 'qwen/qwen-2.5-coder-32b-instruct',
   }
-  const model = modelMap[ctx.match[1]] || 'claude-sonnet-4-6'
+  const model = modelMap[ctx.match[1]] || config.defaultModel
   const name = ctx.match[2]
   const state = pendingRebuild.get(ctx.chat.id)
   if (!state || state.step !== 'model' || state.name !== name) {
@@ -347,8 +353,13 @@ bot.action(/^rbm:(sonnet|opus|haiku):(.+)$/, async (ctx) => {
   if (buildingSet.has(buildKey)) return ctx.answerCbQuery('Already building...', { show_alert: true })
   buildingSet.add(buildKey)
 
-  // Start deploy in background to avoid timeout
-  deployRebuild(ctx, name, state.description, model, state.mode)
+  // Enqueue build to limit concurrency
+  const qs = getQueueStatus()
+  if (qs.waiting > 0) {
+    await ctx.editMessageText(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
+  }
+
+  enqueueBuild(buildKey, () => deployRebuild(ctx, name, state.description, model, state.mode))
     .then(ok => {
       if (ok) showProject(ctx, name).catch(() => {})
     })

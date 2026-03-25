@@ -52,13 +52,12 @@ Or manually:
 git clone https://github.com/maksymhs/vps-bot-multi.git && cd vps-bot-multi && bash install.sh
 ```
 
-The installer handles Node.js, Docker, Caddy, Claude Code CLI, user setup, and systemd service.
+The installer handles Node.js, Docker, Caddy, user setup, and systemd service.
 
 After install, edit `.env` and start:
 
 ```bash
-nano /root/vps-bot-multi/.env   # Set BOT_TOKEN, DOMAIN, ADMIN_USER_ID
-su - vpsbot -c 'claude auth login'
+nano /root/vps-bot-multi/.env   # Set BOT_TOKEN, OPENROUTER_API_KEY, DOMAIN, ADMIN_USER_ID
 systemctl start vps-bot-multi
 ```
 
@@ -85,9 +84,10 @@ systemctl start vps-bot-multi
 - **Configurable limits** — `MAX_APPS_PER_USER` in `.env` (default: 3)
 - **Forced auto-sleep** — idle containers stop after 30 min, wake on HTTP request
 - **Admin panel** — server status, user list, ban/unban (for ADMIN_USER_ID)
-- **AI-powered builds** — Claude Code generates apps from descriptions
+- **AI-powered builds** — OpenRouter API generates apps from descriptions (cheap!)
+- **Build queue** — `MAX_CONCURRENT_BUILDS` prevents server overload
 - **Template matching** — accelerated builds with template boilerplate
-- **Model selection** — Sonnet, Opus, or Haiku per build
+- **Model selection** — DeepSeek, Llama, or Qwen per build
 
 ## Telegram Bot
 
@@ -123,19 +123,19 @@ All via `.env`:
 ```bash
 # Required
 BOT_TOKEN=your_telegram_bot_token
+OPENROUTER_API_KEY=sk-or-v1-your-key
 DOMAIN=your-domain.com
-CLAUDE_CLI=/usr/local/bin/claude
 
 # Admin
 ADMIN_USER_ID=123456789
 
-# Limits
+# Limits & concurrency
 MAX_APPS_PER_USER=3
+MAX_CONCURRENT_BUILDS=2
 IDLE_TIMEOUT=30
 
-# Optional
-OPENROUTER_API_KEY=...
-TEMPLATES_REPO=https://github.com/maksymhs/vps-bot-templates.git
+# Optional: override default model
+# DEFAULT_MODEL=deepseek/deepseek-chat-v3-0324
 ```
 
 ## Architecture
@@ -204,9 +204,9 @@ vps-bot-multi/
 ## Requirements
 
 - **VPS** with 2+ GB RAM (Ubuntu/Debian recommended)
-- **Root access** (Claude Code runs as `vpsbot` user)
+- **Root access** (projects owned by `vpsbot` user)
 - **Ports** 80 and 443 open (for domain mode)
-- **Claude API key** authenticated via `claude auth`
+- **OpenRouter API key** from [openrouter.ai](https://openrouter.ai)
 - **Telegram Bot Token** from @BotFather
 
 ## License

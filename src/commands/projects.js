@@ -1,13 +1,13 @@
 import { execFile, execSync, spawn } from 'child_process'
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'fs'
+import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, statSync } from 'fs'
 import { join, dirname } from 'path'
 import { getDocker } from '../lib/docker-client.js'
 import { buildingSet } from '../lib/build-state.js'
 import { config } from '../lib/config.js'
 import { userStore } from '../lib/user-store.js'
-import { recordClaudeCall } from '../lib/usage.js'
 import { log } from '../lib/logger.js'
 import { syncTemplates, matchTemplate, resolveAndCopy } from '../lib/templates.js'
+import { enqueueBuild, getQueuePosition } from '../lib/build-queue.js'
 
 const MAX_RETRIES = 2
 
@@ -265,140 +265,42 @@ function getExistingFiles(dir) {
   }
 }
 
-async function runClaude(dir, name, description, onProgress = null, errorContext = null, model = 'claude-sonnet-4-6', mode = 'new', templateInfo = null) {
-  const existingFiles = mode === 'new' ? [] : getExistingFiles(dir)
-  const prompt = mode === 'new' || mode === 'full'
-    ? buildClaudePrompt(name, description, errorContext, templateInfo)
-    : buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
+async function runOpenRouter(dir, name, description, onProgress = null, errorContext = null, model = null, mode = 'new', templateInfo = null) {
+  const actualModel = model || config.defaultModel
+  const existingFiles = (mode === 'patch') ? getExistingFiles(dir) : []
+  const prompt = (mode === 'patch')
+    ? buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
+    : buildClaudePrompt(name, description, errorContext, templateInfo)
 
-  const { readdirSync, statSync } = await import('fs')
   const startTime = Date.now()
-
-  log.build(name, `=== ${mode.toUpperCase()} BUILD START ===`, `model=${model}`)
+  log.build(name, `=== ${mode.toUpperCase()} BUILD START ===`, `model=${actualModel}`)
   log.build(name, 'Prompt:', prompt)
 
-  if (onProgress) {
-    await onProgress('🧠 Generating code...')
-  }
+  if (onProgress) await onProgress('🧠 Generating code...')
 
-  // Track files created during build
-  const initialFiles = new Set()
-  try {
-    for (const f of readdirSync(dir, { recursive: true })) {
-      if (typeof f === 'string') initialFiles.add(f)
-    }
-  } catch {}
+  const systemPrompt = `You are a code generator. Output ONLY file contents in this exact format for EACH file:
 
-  try {
-    const claudeBin = config.claudeCli || 'claude'
-    // Write prompt + runner to temp files to avoid bash escaping issues
-    const tmpPrompt = join(dir, '.claude-prompt.txt')
-    const tmpRunner = join(dir, '.claude-run.cjs')
-    writeFileSync(tmpPrompt, prompt)
-    writeFileSync(tmpRunner, [
-      `const p = require("fs").readFileSync(${JSON.stringify(tmpPrompt)}, "utf8");`,
-      `const { execFileSync } = require("child_process");`,
-      `try {`,
-      `  const o = execFileSync(${JSON.stringify(claudeBin)}, ["-p", p, "--dangerously-skip-permissions", "--model", ${JSON.stringify(model)}], { timeout: 280000, maxBuffer: 50*1024*1024 });`,
-      `  process.stdout.write(o);`,
-      `} catch(e) {`,
-      `  process.stderr.write(e.stderr ? e.stderr.toString() : e.message);`,
-      `  process.exit(1);`,
-      `}`,
-    ].join('\n') + '\n')
-    try { execSync(`chown vpsbot:vpsbot ${JSON.stringify(tmpPrompt)} ${JSON.stringify(tmpRunner)}`) } catch {}
-    const output = await run('su', ['-', 'vpsbot', '-c', `cd ${JSON.stringify(dir)} && node .claude-run.cjs`], { timeout: 300_000 })
-    try { rmSync(tmpPrompt) } catch {}
-    try { rmSync(tmpRunner) } catch {}
-    log.build(name, 'Claude output:', output || '(no stdout)')
-    try {
-      recordClaudeCall(Math.round(prompt.length / 4))
-    } catch {}
-  } catch (err) {
-    log.buildError(name, 'Claude failed:', err.message)
-    throw err
-  }
+--- FILE: path/to/file.ext ---
+file contents here
+--- END FILE ---
 
-  // Show summary of generated/modified files
-  const elapsed = Math.round((Date.now() - startTime) / 1000)
-  log.build(name, `Code generation completed in ${elapsed}s`)
+Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
-  // Log file summary to build log
-  try {
-    const files = readdirSync(dir, { recursive: true })
-    const fileList = []
-    for (const file of files) {
-      if (typeof file === 'string' && !file.includes('node_modules') && !file.includes('.git')) {
-        const fullPath = join(dir, file)
-        try {
-          const stat = statSync(fullPath)
-          if (stat.isFile()) {
-            const sizeStr = stat.size > 1024 ? `${(stat.size/1024).toFixed(1)}KB` : `${stat.size}B`
-            fileList.push(`${file} (${sizeStr})`)
-          }
-        } catch {}
-      }
-    }
-    log.build(name, 'Files:', fileList.join(', '))
-  } catch {}
-  fixUnicodeChars(dir)
-}
-
-async function runClaudeWithStreaming(dir, name, description, onProgress, errorContext = null, model = 'claude-sonnet-4-6') {
-  const prompt = buildClaudePrompt(name, description, errorContext)
-  const lines = []
-  let lastUpdate = Date.now()
-
-  const claudeBin = config.claudeCli || 'claude'
-  // Write prompt + runner to temp files to avoid bash escaping issues
-  const tmpPrompt = join(dir, '.claude-prompt.txt')
-  const tmpRunner = join(dir, '.claude-run.cjs')
-  writeFileSync(tmpPrompt, prompt)
-  writeFileSync(tmpRunner, [
-    `const p = require("fs").readFileSync(${JSON.stringify(tmpPrompt)}, "utf8");`,
-    `const { execFileSync } = require("child_process");`,
-    `try {`,
-    `  const o = execFileSync(${JSON.stringify(claudeBin)}, ["-p", p, "--dangerously-skip-permissions", "--model", ${JSON.stringify(model)}], { timeout: 280000, maxBuffer: 50*1024*1024 });`,
-    `  process.stdout.write(o);`,
-    `} catch(e) {`,
-    `  process.stderr.write(e.stderr ? e.stderr.toString() : e.message);`,
-    `  process.exit(1);`,
-    `}`,
-  ].join('\n') + '\n')
-  try { execSync(`chown vpsbot:vpsbot ${JSON.stringify(tmpPrompt)} ${JSON.stringify(tmpRunner)}`) } catch {}
-  await runWithStreaming('su', ['-', 'vpsbot', '-c', `cd ${JSON.stringify(dir)} && node .claude-run.cjs`], {
-    onData: async (chunk) => {
-      lines.push(...chunk.split('\n').filter(l => l.trim()))
-
-      // Update every 2 seconds
-      if (Date.now() - lastUpdate > 2000) {
-        lastUpdate = Date.now()
-        const recent = lines.slice(-12).join('\n')
-        await onProgress(recent)
-      }
-    }
-  })
-
-  try { rmSync(tmpPrompt) } catch {}
-  try { rmSync(tmpRunner) } catch {}
-  fixUnicodeChars(dir)
-}
-
-async function runOpenRouter(dir, name, description, errorContext = null, model = 'minimax/MiniMax-M2.5') {
-  const prompt = buildClaudePrompt(name, description, errorContext)
-  
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${config.openrouterKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://vps-bot.local',
-      'X-Title': 'VPS-Bot',
+      'HTTP-Referer': 'https://vps-bot-multi.local',
+      'X-Title': 'VPS-Bot-Multi',
     },
     body: JSON.stringify({
-      model: model,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 4096,
+      model: actualModel,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 16384,
     }),
   })
 
@@ -414,46 +316,74 @@ async function runOpenRouter(dir, name, description, errorContext = null, model 
     throw new Error('OpenRouter returned no content')
   }
 
-  // OpenRouter models usually return code in markdown blocks, extract them
-  const codeBlocks = content.match(/```(?:javascript|js|node)?\n?([\s\S]*?)```/g) || []
-  
-  // If we got code blocks, write them to files. Otherwise try to parse as JSON or use whole response
-  if (codeBlocks.length > 0) {
-    // Common patterns: multiple files might be in separate code blocks
-    // For simplicity, we'll try to detect file structure from the content
-    const cleanContent = content.replace(/```[\w]*\n?|```/g, '').trim()
-    
-    // Try to create a simple single-file output (index.js + package.json approach)
-    // The prompt asks for src/index.js, package.json, Dockerfile
-    // For now, write the main content and handle file detection
-    if (cleanContent.includes('package.json') || cleanContent.includes('src/index.js')) {
-      // Multi-file response
-      const files = parseMultiFileContent(cleanContent)
-      for (const [filename, fileContent] of Object.entries(files)) {
+  log.build(name, 'OpenRouter response length:', content.length)
+
+  // Parse structured file output: --- FILE: path --- ... --- END FILE ---
+  let filesWritten = 0
+  const filePattern = /---\s*FILE:\s*([^\s-][^\n]*?)\s*---\n([\s\S]*?)\n---\s*END FILE\s*---/g
+  let match
+  while ((match = filePattern.exec(content)) !== null) {
+    const filename = match[1].trim()
+    const fileContent = match[2]
+    const filePath = join(dir, filename)
+    mkdirSync(dirname(filePath), { recursive: true })
+    writeFileSync(filePath, fileContent)
+    filesWritten++
+    log.build(name, `  wrote: ${filename} (${fileContent.length}B)`)
+  }
+
+  // Fallback: try markdown code blocks with filename comments
+  if (filesWritten === 0) {
+    const files = parseMultiFileContent(content)
+    const entries = Object.entries(files)
+    if (entries.length > 0) {
+      for (const [filename, fileContent] of entries) {
         const filePath = join(dir, filename)
         mkdirSync(dirname(filePath), { recursive: true })
         writeFileSync(filePath, fileContent)
-      }
-    } else {
-      // Single file response - assume it's the main index.js
-      mkdirSync(join(dir, 'src'), { recursive: true })
-      writeFileSync(join(dir, 'src', 'index.js'), cleanContent)
-      // Create minimal package.json if not present
-      if (!existsSync(join(dir, 'package.json'))) {
-        writeFileSync(join(dir, 'package.json'), JSON.stringify({
-          name: name,
-          type: "module",
-          scripts: { start: "node src/index.js" },
-          dependencies: { express: "^4.18.0" }
-        }, null, 2))
+        filesWritten++
       }
     }
-  } else {
-    // No code blocks found, write the whole content as index.js
-    mkdirSync(join(dir, 'src'), { recursive: true })
-    writeFileSync(join(dir, 'src', 'index.js'), content)
   }
-  
+
+  // Last resort: dump as single index.js
+  if (filesWritten === 0) {
+    const cleanContent = content.replace(/```[\w]*\n?|```/g, '').trim()
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    writeFileSync(join(dir, 'src', 'index.js'), cleanContent)
+    if (!existsSync(join(dir, 'package.json'))) {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({
+        name: name,
+        type: 'module',
+        scripts: { start: 'node src/index.js' },
+        dependencies: { express: '^4.18.0' }
+      }, null, 2))
+    }
+    filesWritten = 1
+  }
+
+  const elapsed = Math.round((Date.now() - startTime) / 1000)
+  log.build(name, `Code generation completed in ${elapsed}s (${filesWritten} files)`)
+
+  // Log file summary
+  try {
+    const allFiles = readdirSync(dir, { recursive: true })
+    const fileList = []
+    for (const file of allFiles) {
+      if (typeof file === 'string' && !file.includes('node_modules') && !file.includes('.git')) {
+        const fullPath = join(dir, file)
+        try {
+          const stat = statSync(fullPath)
+          if (stat.isFile()) {
+            const sizeStr = stat.size > 1024 ? `${(stat.size/1024).toFixed(1)}KB` : `${stat.size}B`
+            fileList.push(`${file} (${sizeStr})`)
+          }
+        } catch {}
+      }
+    }
+    log.build(name, 'Files:', fileList.join(', '))
+  } catch {}
+
   fixUnicodeChars(dir)
 }
 
@@ -639,17 +569,12 @@ async function pollHealth(ip, port, timeoutMs = 40_000, onProgress = null) {
   return false
 }
 
-function isOpenRouterModel(model) {
-  return config.openrouterKey && (model.startsWith('openrouter/') || model.includes(':'))
-}
-
-async function buildAndVerify(dir, userId, name, description, onStatus, errorContext = null, model = 'claude-sonnet-4-6', mode = 'new') {
-  let modelTag = '🚀 Sonnet'
-  if (model.includes('opus')) modelTag = '🧠 Opus'
-  else if (model.includes('haiku')) modelTag = '⚡ Haiku'
+async function buildAndVerify(dir, userId, name, description, onStatus, errorContext = null, model = null, mode = 'new') {
+  const actualModel = model || config.defaultModel
+  const modelShort = actualModel.split('/').pop()
 
   const logName = `u${userId}-${name}`
-  log.info(`[${logName}] build start`, `model=${model} dir=${dir} mode=${mode}`)
+  log.info(`[${logName}] build start`, `model=${actualModel} dir=${dir} mode=${mode}`)
 
   // Template flow: sync repo, match template+components, copy files (only for new/full builds)
   let templateInfo = null
@@ -680,33 +605,25 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
     }
   }
 
-  if (isOpenRouterModel(model)) {
-    await onStatus('🧠 Generating code...')
-    await runOpenRouter(dir, name, description, errorContext, model.replace('openrouter/', ''))
-  } else {
-    try {
-      await runClaude(dir, name, description, onStatus, errorContext, model, mode, templateInfo)
-      log.info(`[${logName}] code generated`)
-    } catch (err) {
-      log.error(`[${logName}] code generation failed`, err.message)
-      throw new Error(`Code generation failed: ${err.message}`)
-    }
+  try {
+    await runOpenRouter(dir, name, description, onStatus, errorContext, actualModel, mode, templateInfo)
+    log.info(`[${logName}] code generated`)
+  } catch (err) {
+    log.error(`[${logName}] code generation failed`, err.message)
+    throw new Error(`Code generation failed: ${err.message}`)
   }
 
+  // Ensure Dockerfile exists (fallback)
   if (!existsSync(join(dir, 'Dockerfile'))) {
-    if (isOpenRouterModel(model)) {
-      const dockerfile = `FROM node:20-alpine
+    const dockerfile = `FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm install --omit=dev
 COPY . .
 EXPOSE 3000
 CMD ["npm", "start"]`
-      writeFileSync(join(dir, 'Dockerfile'), dockerfile)
-    } else {
-      log.error(`[${logName}] no Dockerfile generated`)
-      throw new Error('Claude did not generate the Dockerfile.')
-    }
+    writeFileSync(join(dir, 'Dockerfile'), dockerfile)
+    log.build(logName, 'Generated fallback Dockerfile')
   }
 
   writeComposeFile(dir, userId, name)
@@ -770,7 +687,7 @@ CMD ["npm", "start"]`
   await onStatus(`✅ Ready → ${url}`)
 }
 
-async function deployWithRetry(ctx, dir, userId, name, description, action, model = 'claude-sonnet-4-6', mode = null) {
+async function deployWithRetry(ctx, dir, userId, name, description, action, model = null, mode = null) {
   let lastError = null
   let statusMsgId = null
   const buildStart = Date.now()
@@ -820,7 +737,7 @@ async function deployWithRetry(ctx, dir, userId, name, description, action, mode
   return false
 }
 
-export async function deployNew(ctx, name, description, model = 'claude-sonnet-4-6') {
+export async function deployNew(ctx, name, description, model = null) {
   const userId = getUserId(ctx)
   const dir = userStore.projectDir(userId, name)
   mkdirSync(dir, { recursive: true })
@@ -842,7 +759,7 @@ export async function deployNew(ctx, name, description, model = 'claude-sonnet-4
   return ok
 }
 
-export async function deployRebuild(ctx, name, description, model = 'claude-sonnet-4-6', mode = 'patch') {
+export async function deployRebuild(ctx, name, description, model = null, mode = 'patch') {
   const userId = getUserId(ctx)
   const dir = userStore.projectDir(userId, name)
 

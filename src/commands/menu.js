@@ -169,15 +169,15 @@ export async function startRebuildFull(ctx, name) {
 }
 
 export function showModelSelect(ctx, prefix, name, edit = false) {
-  const text = `🤖 *Select model*\n\n🚀 *Sonnet* — fast and efficient _(recommended)_\n🧠 *Opus* — more powerful, slower\n⚡ *Haiku* — ultra-fast, great for simple tasks`
+  const text = `🤖 *Select model*\n\n🧠 *DeepSeek* — smart & cheap _(recommended)_\n⚡ *Llama* — ultra-fast, great for simple apps\n🔥 *Qwen* — strong coding model`
 
   const kb = [
     [
-      Markup.button.callback('🚀 Sonnet', `${prefix}:sonnet:${name}`),
-      Markup.button.callback('🧠 Opus', `${prefix}:opus:${name}`),
+      Markup.button.callback('🧠 DeepSeek', `${prefix}:deepseek:${name}`),
+      Markup.button.callback('⚡ Llama', `${prefix}:llama:${name}`),
     ],
     [
-      Markup.button.callback('⚡ Haiku', `${prefix}:haiku:${name}`),
+      Markup.button.callback('🔥 Qwen', `${prefix}:qwen:${name}`),
     ],
     [Markup.button.callback('❌ Cancel', `p:${name}`)],
   ]

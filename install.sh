@@ -161,16 +161,7 @@ else
         apt-get update && apt-get install -y caddy"
 fi
 
-# Claude Code CLI
-if command -v claude &> /dev/null; then
-    echo -e "  ${GREEN}✔${NC} Claude Code CLI"
-    CLAUDE_CLI=$(command -v claude)
-else
-    run_silent "Claude Code CLI" npm install -g @anthropic-ai/claude-code
-    CLAUDE_CLI=$(command -v claude 2>/dev/null || echo "claude")
-fi
-
-# vpsbot user (for Claude Code execution)
+# vpsbot user (for project file ownership)
 VPSBOT_USER="vpsbot"
 VPSBOT_HOME="/home/${VPSBOT_USER}"
 if id "$VPSBOT_USER" &>/dev/null; then
@@ -279,8 +270,7 @@ echo -e "  ${GREEN}${BOLD}✔ Installation complete${NC}"
 echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
 echo ""
 echo -e "  ${CYAN}${BOLD}Next steps:${NC}"
-echo -e "  ${DIM}1. Edit .env → set BOT_TOKEN, DOMAIN, ADMIN_USER_ID${NC}"
-echo -e "  ${DIM}2. Authenticate Claude: su - vpsbot -c 'claude auth login'${NC}"
-echo -e "  ${DIM}3. Start: systemctl start vps-bot-multi${NC}"
-echo -e "  ${DIM}4. Check: systemctl status vps-bot-multi${NC}"
+echo -e "  ${DIM}1. Edit .env → set BOT_TOKEN, OPENROUTER_API_KEY, DOMAIN, ADMIN_USER_ID${NC}"
+echo -e "  ${DIM}2. Start: systemctl start vps-bot-multi${NC}"
+echo -e "  ${DIM}3. Check: systemctl status vps-bot-multi${NC}"
 echo ""

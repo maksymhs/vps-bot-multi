@@ -37,10 +37,12 @@ export const config = {
   // Multi-user limits
   get maxAppsPerUser() { return parseInt(process.env.MAX_APPS_PER_USER ?? '3') },
 
-  // Claude CLI (required)
-  get claudeCli() { return process.env.CLAUDE_CLI || undefined },
-  get nodeBin() { return process.env.NODE_BIN ?? '/usr/bin/node' },
-  get openrouterKey() { return process.env.OPENROUTER_API_KEY ?? null },
+  // OpenRouter API (REQUIRED for code generation)
+  get openrouterKey() { return process.env.OPENROUTER_API_KEY || undefined },
+  get defaultModel() { return process.env.DEFAULT_MODEL ?? 'deepseek/deepseek-chat-v3-0324' },
+
+  // Build concurrency
+  get maxConcurrentBuilds() { return parseInt(process.env.MAX_CONCURRENT_BUILDS ?? '2') },
 
   // Templates
   get templatesRepo() { return process.env.TEMPLATES_REPO ?? 'https://github.com/maksymhs/vps-bot-templates.git' },
@@ -57,7 +59,7 @@ export const config = {
 
   // Verify setup is complete
   isSetupComplete() {
-    return !!(this.botToken && this.claudeCli && (this.domain || this.ipAddress))
+    return !!(this.botToken && this.openrouterKey && (this.domain || this.ipAddress))
   },
 
   // Get network type
