@@ -364,17 +364,11 @@ else
 fi
 echo ""
 
-# Claude auth — needs a real pseudo-TTY, use 'script' to provide one
 if [ "$CLAUDE_OK" = false ] && command -v claude &>/dev/null; then
-    echo -e "  ${CYAN}${BOLD}Authenticating Claude...${NC}"
-    echo -e "  ${DIM}After sign-in, paste the code shown in the browser back here.${NC}"
+    echo -e "  ${CYAN}${BOLD}Last step — authenticate Claude:${NC}"
     echo ""
-    script -qc "claude auth login" /dev/null
+    echo -e "  ${BOLD}    claude auth login${NC}"
     echo ""
-    if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1; then
-        echo -e "  ${GREEN}✔${NC} Claude authenticated"
-        systemctl restart vps-bot-multi > /dev/null 2>&1 && echo -e "  ${GREEN}✔${NC} Bot restarted"
-    else
-        echo -e "  ${YELLOW}!${NC} Auth failed — run manually: ${CYAN}claude auth login${NC}"
-    fi
+    echo -e "  ${DIM}  Then restart the bot:${NC}"
+    echo -e "  ${DIM}    systemctl restart vps-bot-multi${NC}"
 fi
