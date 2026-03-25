@@ -4,26 +4,19 @@ import { join, dirname } from 'path'
 import { getDocker } from '../lib/docker-client.js'
 import { buildingSet } from '../lib/build-state.js'
 import { config } from '../lib/config.js'
-import { store } from '../lib/store.js'
+import { userStore } from '../lib/user-store.js'
 import { recordClaudeCall } from '../lib/usage.js'
 import { log } from '../lib/logger.js'
-import { initGitRepo, gitCommit } from './git.js'
 import { syncTemplates, matchTemplate, resolveAndCopy } from '../lib/templates.js'
 
 const MAX_RETRIES = 2
 
-function projectDir(name) {
-  return join(config.projectsDir, name)
+function getUserId(ctx) {
+  return ctx.from?.id
 }
 
-export function projectUrl(name) {
-  if (config.domain) {
-    return `https://${name}.${config.domain}`
-  }
-  const project = store.get(name)
-  const port = project?.port
-  const ip = config.ipAddress || 'localhost'
-  return port ? `http://${ip}:${port}` : `http://${ip}`
+export function projectUrl(userId, name) {
+  return config.projectUrl(userId, name)
 }
 
 function run(cmd, args, opts = {}) {
@@ -94,28 +87,31 @@ function runWithStreaming(cmd, args, opts = {}) {
   })
 }
 
-function getNextPort() {
+function getNextPort(userId) {
   const BASE_PORT = 4000
-  const projects = store.getAll()
-  const usedPorts = new Set(Object.values(projects).map(p => p.port).filter(Boolean))
+  // Check all users' ports globally to avoid collisions
+  const allProjects = userStore.getAllProjectsGlobal()
+  const usedPorts = new Set(Object.values(allProjects).map(p => p.port).filter(Boolean))
   let port = BASE_PORT
   while (usedPorts.has(port)) port++
   return port
 }
 
 
-export function writeComposeFile(dir, name) {
+export function writeComposeFile(dir, userId, name) {
+  const containerName = userStore.containerName(userId, name)
+  const subdomain = `u${userId}-${name}`
   let compose
   if (config.domain) {
     compose = `services:
   app:
-    container_name: ${name}-app
+    container_name: ${containerName}
     build: .
     restart: unless-stopped
     networks:
       - caddy
     labels:
-      caddy: ${name}.${config.domain}
+      caddy: ${subdomain}.${config.domain}
       caddy.reverse_proxy: "{{upstreams 3000}}"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
@@ -128,12 +124,13 @@ networks:
     external: true
 `
   } else {
-    const port = store.get(name)?.port || getNextPort()
+    const existing = userStore.getProject(userId, name)
+    const port = existing?.port || getNextPort(userId)
     const url = `http://${config.ipAddress || 'localhost'}:${port}`
-    store.set(name, { port, url })
+    userStore.setProject(userId, name, { port, url })
     compose = `services:
   app:
-    container_name: ${name}-app
+    container_name: ${containerName}
     build: .
     restart: unless-stopped
     ports:
@@ -590,9 +587,9 @@ async function dockerComposeDown(dir) {
   } catch { /* ignore */ }
 }
 
-async function getContainerIp(name) {
+async function getContainerIpByFullName(containerFullName) {
   const containers = await getDocker().listContainers({
-    filters: JSON.stringify({ name: [`${name}-app`] }),
+    filters: JSON.stringify({ name: [containerFullName] }),
   })
   if (!containers.length) return null
   const info = await getDocker().getContainer(containers[0].Id).inspect()
@@ -605,11 +602,11 @@ async function getContainerIp(name) {
   return null
 }
 
-async function getContainerLogs(name) {
+async function getContainerLogsByFullName(containerFullName) {
   try {
     const containers = await getDocker().listContainers({
       all: true,
-      filters: JSON.stringify({ name: [`${name}-app`] }),
+      filters: JSON.stringify({ name: [containerFullName] }),
     })
     if (!containers.length) return ''
     const container = getDocker().getContainer(containers[0].Id)
@@ -646,12 +643,13 @@ function isOpenRouterModel(model) {
   return config.openrouterKey && (model.startsWith('openrouter/') || model.includes(':'))
 }
 
-async function buildAndVerify(dir, name, description, onStatus, errorContext = null, model = 'claude-sonnet-4-6', mode = 'new') {
+async function buildAndVerify(dir, userId, name, description, onStatus, errorContext = null, model = 'claude-sonnet-4-6', mode = 'new') {
   let modelTag = '🚀 Sonnet'
   if (model.includes('opus')) modelTag = '🧠 Opus'
   else if (model.includes('haiku')) modelTag = '⚡ Haiku'
 
-  log.info(`[${name}] build start`, `model=${model} dir=${dir} mode=${mode}`)
+  const logName = `u${userId}-${name}`
+  log.info(`[${logName}] build start`, `model=${model} dir=${dir} mode=${mode}`)
 
   // Template flow: sync repo, match template+components, copy files (only for new/full builds)
   let templateInfo = null
@@ -664,21 +662,21 @@ async function buildAndVerify(dir, name, description, onStatus, errorContext = n
         const label = match.stack
           ? `stack: ${match.stack.displayName || match.stack.name}`
           : `template: ${match.template.displayName}`
-        log.info(`[${name}] matched ${label} (score=${match.score})`)
+        log.info(`[${logName}] matched ${label} (score=${match.score})`)
         await onStatus(`📋 Using ${label}`)
 
         // Copy template boilerplate + component files in one call
         templateInfo = resolveAndCopy(match, dir)
         if (templateInfo) {
           try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
-          store.set(name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
-          log.info(`[${name}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
+          userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
+          log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
         }
       } else {
-        log.info(`[${name}] no template matched, using generic build`)
+        log.info(`[${logName}] no template matched, using generic build`)
       }
     } else {
-      log.info(`[${name}] templates sync failed, using generic build`)
+      log.info(`[${logName}] templates sync failed, using generic build`)
     }
   }
 
@@ -688,9 +686,9 @@ async function buildAndVerify(dir, name, description, onStatus, errorContext = n
   } else {
     try {
       await runClaude(dir, name, description, onStatus, errorContext, model, mode, templateInfo)
-      log.info(`[${name}] code generated`)
+      log.info(`[${logName}] code generated`)
     } catch (err) {
-      log.error(`[${name}] code generation failed`, err.message)
+      log.error(`[${logName}] code generation failed`, err.message)
       throw new Error(`Code generation failed: ${err.message}`)
     }
   }
@@ -706,75 +704,77 @@ EXPOSE 3000
 CMD ["npm", "start"]`
       writeFileSync(join(dir, 'Dockerfile'), dockerfile)
     } else {
-      log.error(`[${name}] no Dockerfile generated`)
+      log.error(`[${logName}] no Dockerfile generated`)
       throw new Error('Claude did not generate the Dockerfile.')
     }
   }
 
-  writeComposeFile(dir, name)
-  log.build(name, 'Docker compose up starting')
+  writeComposeFile(dir, userId, name)
+  log.build(logName, 'Docker compose up starting')
   await onStatus('🐳 Building image...')
 
   const onDockerProgress = async (step) => {
-    log.build(name, `Docker: ${step}`)
+    log.build(logName, `Docker: ${step}`)
   }
 
   try {
     await dockerComposeUp(dir, onDockerProgress)
-    log.build(name, 'Docker compose up OK')
-    log.info(`[${name}] docker compose up OK`)
+    log.build(logName, 'Docker compose up OK')
+    log.info(`[${logName}] docker compose up OK`)
   } catch (err) {
-    log.buildError(name, 'Docker compose up failed', err.message)
-    log.error(`[${name}] docker compose up failed`, err.message)
+    log.buildError(logName, 'Docker compose up failed', err.message)
+    log.error(`[${logName}] docker compose up failed`, err.message)
     throw err
   }
 
   await onStatus('🔍 Verifying...')
 
   // In IP mode, check via localhost:mappedPort; in domain mode, use container IP:3000
-  const project = store.get(name)
+  const containerFullName = userStore.containerName(userId, name)
+  const project = userStore.getProject(userId, name)
   let healthHost, healthPort
-  log.info(`[${name}] health check setup`, `domain=${config.domain || 'none'} project.port=${project?.port}`)
+  log.info(`[${logName}] health check setup`, `domain=${config.domain || 'none'} project.port=${project?.port}`)
 
   if (!config.domain && project?.port) {
     healthHost = '127.0.0.1'
     healthPort = project.port
   } else {
-    const ip = await getContainerIp(name)
-    log.info(`[${name}] container IP: ${ip || 'null'}`)
+    const ip = await getContainerIpByFullName(containerFullName)
+    log.info(`[${logName}] container IP: ${ip || 'null'}`)
     if (!ip) {
-      const logs = await getContainerLogs(name)
-      log.error(`[${name}] container has no IP`, logs)
+      const logs = await getContainerLogsByFullName(containerFullName)
+      log.error(`[${logName}] container has no IP`, logs)
       throw new Error(`Container failed to start.\n${logs.slice(-800)}`)
     }
     healthHost = ip
     healthPort = 3000
   }
 
-  log.info(`[${name}] polling health at ${healthHost}:${healthPort}`)
+  log.info(`[${logName}] polling health at ${healthHost}:${healthPort}`)
 
   const onHealthProgress = async (msg) => {
-    log.build(name, `Health: ${msg}`)
+    log.build(logName, `Health: ${msg}`)
   }
 
   const healthy = await pollHealth(healthHost, healthPort, 40_000, onHealthProgress)
   if (!healthy) {
-    const containerLogs = await getContainerLogs(name)
-    log.buildError(name, 'Health check failed after 40s', containerLogs)
-    log.error(`[${name}] health check failed after 40s`, containerLogs)
+    const containerLogs = await getContainerLogsByFullName(containerFullName)
+    log.buildError(logName, 'Health check failed after 40s', containerLogs)
+    log.error(`[${logName}] health check failed after 40s`, containerLogs)
     throw new Error(`App not responding after 40s.\n${containerLogs.slice(-800)}`)
   }
 
-  const url = projectUrl(name)
-  log.build(name, `=== DEPLOY OK === ${url}`)
-  log.info(`[${name}] deploy OK → ${url}`)
+  const url = projectUrl(userId, name)
+  log.build(logName, `=== DEPLOY OK === ${url}`)
+  log.info(`[${logName}] deploy OK → ${url}`)
   await onStatus(`✅ Ready → ${url}`)
 }
 
-async function deployWithRetry(ctx, dir, name, description, action, model = 'claude-sonnet-4-6', mode = null) {
+async function deployWithRetry(ctx, dir, userId, name, description, action, model = 'claude-sonnet-4-6', mode = null) {
   let lastError = null
   let statusMsgId = null
   const buildStart = Date.now()
+  const logName = `u${userId}-${name}`
 
   if (!mode) mode = action === 'new' ? 'new' : 'rebuild'
 
@@ -800,13 +800,13 @@ async function deployWithRetry(ctx, dir, name, description, action, model = 'cla
         statusMsgId = null
       }
 
-      await buildAndVerify(dir, name, description, onStatus,
+      await buildAndVerify(dir, userId, name, description, onStatus,
         attempt > 1 ? lastError?.message : null, model, mode)
 
       return true
     } catch (err) {
       lastError = err
-      log.error(`[${name}] attempt ${attempt} failed`, err.message)
+      log.error(`[${logName}] attempt ${attempt} failed`, err.message)
       if (attempt < MAX_RETRIES) {
         statusMsgId = null
         await ctx.reply(`⚠️ Attempt ${attempt} failed, retrying...`, { parse_mode: 'Markdown' })
@@ -815,28 +815,22 @@ async function deployWithRetry(ctx, dir, name, description, action, model = 'cla
     }
   }
 
-  log.error(`[${name}] failed after ${MAX_RETRIES} attempts`, lastError?.message)
+  log.error(`[${logName}] failed after ${MAX_RETRIES} attempts`, lastError?.message)
   await ctx.reply(`❌ *${name}* — Failed after ${MAX_RETRIES} attempts`, { parse_mode: 'Markdown' })
   return false
 }
 
 export async function deployNew(ctx, name, description, model = 'claude-sonnet-4-6') {
-  mkdirSync(projectDir(name), { recursive: true })
-  try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(projectDir(name))}`) } catch {}
-  const ok = await deployWithRetry(ctx, projectDir(name), name, description, 'new', model)
+  const userId = getUserId(ctx)
+  const dir = userStore.projectDir(userId, name)
+  mkdirSync(dir, { recursive: true })
+  try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
+  const ok = await deployWithRetry(ctx, dir, userId, name, description, 'new', model)
   if (ok) {
-    store.set(name, { description, url: projectUrl(name), dir: projectDir(name), model })
-
-    // Auto-init git repo + initial commit
-    try {
-      await initGitRepo(name, null)
-      log.info(`[${name}] git repo initialized`)
-    } catch (err) {
-      log.error(`[${name}] git init failed`, err.message)
-    }
+    userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
 
     const { Markup } = await import('telegraf')
-    const url = projectUrl(name)
+    const url = projectUrl(userId, name)
     await ctx.reply(`✅ *${name}* created\n🔗 ${url}`, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -849,7 +843,8 @@ export async function deployNew(ctx, name, description, model = 'claude-sonnet-4
 }
 
 export async function deployRebuild(ctx, name, description, model = 'claude-sonnet-4-6', mode = 'patch') {
-  const dir = projectDir(name)
+  const userId = getUserId(ctx)
+  const dir = userStore.projectDir(userId, name)
 
   // For full rebuild, remove the project directory first to recreate from scratch
   if (mode === 'full') {
@@ -865,23 +860,12 @@ export async function deployRebuild(ctx, name, description, model = 'claude-sonn
     }
   }
 
-  const ok = await deployWithRetry(ctx, dir, name, description, 'rebuild', model, mode)
+  const ok = await deployWithRetry(ctx, dir, userId, name, description, 'rebuild', model, mode)
   if (ok) {
-    store.set(name, { description, url: projectUrl(name), dir: dir, model })
-
-    // Auto-commit changes
-    try {
-      const commitMsg = mode === 'full'
-        ? `Full rebuild: ${description.slice(0, 100)}`
-        : `Patch: ${description.split('Requested changes:').pop()?.trim().slice(0, 100) || description.slice(0, 100)}`
-      await gitCommit(name, commitMsg)
-      log.info(`[${name}] git commit after rebuild`)
-    } catch (err) {
-      log.error(`[${name}] git commit failed`, err.message)
-    }
+    userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
 
     const { Markup } = await import('telegraf')
-    const url = projectUrl(name)
+    const url = projectUrl(userId, name)
     await ctx.reply(`✅ *${name}* updated\n🔗 ${url}`, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -894,6 +878,7 @@ export async function deployRebuild(ctx, name, description, model = 'claude-sonn
 }
 
 export async function newCommand(ctx) {
+  const userId = getUserId(ctx)
   const parts = ctx.message.text.split(' ')
   const rawName = parts[1]
   const description = parts.slice(2).join(' ').trim()
@@ -904,53 +889,62 @@ export async function newCommand(ctx) {
 
   const name = rawName.toLowerCase().replace(/[^a-z0-9-]/g, '-')
 
-  if (store.get(name)) {
+  if (!userStore.canCreateProject(userId)) {
+    return ctx.reply(`⚠️ Limit reached (${config.maxAppsPerUser} apps). Delete one first.`)
+  }
+  if (userStore.getProject(userId, name)) {
     return ctx.reply(`"${name}" already exists. Use /rebuild ${name} to update it.`)
   }
-  if (buildingSet.has(name)) return ctx.reply(`"${name}" is already building...`)
 
-  buildingSet.add(name)
+  const buildKey = `u${userId}-${name}`
+  if (buildingSet.has(buildKey)) return ctx.reply(`"${name}" is already building...`)
+
+  buildingSet.add(buildKey)
   const msg = await ctx.reply('⚙️ Starting...', { parse_mode: 'Markdown' })
   const ok = await deployNew(ctx, name, description)
-  buildingSet.delete(name)
+  buildingSet.delete(buildKey)
 
   if (ok) {
     return ctx.telegram.editMessageText(
       ctx.chat.id, msg.message_id, undefined,
-      `✅ *${name}* is ready!\n\n🔗 ${projectUrl(name)}\n\n_/rebuild ${name} to iterate_`,
+      `✅ *${name}* is ready!\n\n🔗 ${projectUrl(userId, name)}\n\n_/rebuild ${name} to iterate_`,
       { parse_mode: 'Markdown' }
     )
   }
 }
 
 export async function rebuildCommand(ctx) {
+  const userId = getUserId(ctx)
   const parts = ctx.message.text.split(' ')
   const name = parts[1]?.toLowerCase()
   const newDescription = parts.slice(2).join(' ').trim()
 
   if (!name) return ctx.reply('Usage: /rebuild <name> [new description]')
 
-  const project = store.get(name)
+  const project = userStore.getProject(userId, name)
   if (!project) return ctx.reply(`Project "${name}" not found. Use /new to create it.`)
-  if (buildingSet.has(name)) return ctx.reply(`"${name}" is already building...`)
 
-  buildingSet.add(name)
+  const buildKey = `u${userId}-${name}`
+  if (buildingSet.has(buildKey)) return ctx.reply(`"${name}" is already building...`)
+
+  buildingSet.add(buildKey)
   const description = newDescription || project.description
   const msg = await ctx.reply('♻️ Starting...', { parse_mode: 'Markdown' })
   const ok = await deployRebuild(ctx, name, description)
-  buildingSet.delete(name)
+  buildingSet.delete(buildKey)
 
   if (ok) {
     return ctx.telegram.editMessageText(
       ctx.chat.id, msg.message_id, undefined,
-      `✅ *${name}* updated!\n\n🔗 ${projectUrl(name)}`,
+      `✅ *${name}* updated!\n\n🔗 ${projectUrl(userId, name)}`,
       { parse_mode: 'Markdown' }
     )
   }
 }
 
 export async function listCommand(ctx) {
-  const projects = store.getAll()
+  const userId = getUserId(ctx)
+  const projects = userStore.getAllProjects(userId)
   const names = Object.keys(projects)
 
   if (!names.length) {
@@ -966,29 +960,31 @@ export async function listCommand(ctx) {
 }
 
 export async function urlCommand(ctx) {
+  const userId = getUserId(ctx)
   const name = ctx.message.text.split(' ')[1]?.toLowerCase()
   if (!name) return ctx.reply('Usage: /url <name>')
 
-  const project = store.get(name)
+  const project = userStore.getProject(userId, name)
   if (!project) return ctx.reply(`Project "${name}" not found.`)
 
   return ctx.reply(`🔗 *${name}*: ${project.url}`, { parse_mode: 'Markdown' })
 }
 
 export async function deleteProjectCommand(ctx) {
+  const userId = getUserId(ctx)
   const name = ctx.message.text.split(' ')[1]?.toLowerCase()
   if (!name) return ctx.reply('Usage: /delete <name>')
 
-  const project = store.get(name)
+  const project = userStore.getProject(userId, name)
   if (!project) return ctx.reply(`Project "${name}" not found.`)
 
   const msg = await ctx.reply(`🗑️ Deleting *${name}*...`, { parse_mode: 'Markdown' })
-  const dir = projectDir(name)
+  const dir = userStore.projectDir(userId, name)
 
   try {
     await dockerComposeDown(dir)
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
-    store.delete(name)
+    userStore.deleteProject(userId, name)
 
     return ctx.telegram.editMessageText(
       ctx.chat.id, msg.message_id, undefined,

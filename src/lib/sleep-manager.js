@@ -1,6 +1,6 @@
 import { getDocker } from './docker-client.js'
 import { config } from './config.js'
-import { store } from './store.js'
+import { userStore } from './user-store.js'
 import { log } from './logger.js'
 import http from 'http'
 import { execSync } from 'child_process'
@@ -30,11 +30,11 @@ export async function reconcileSleepState() {
       running.map(c => c.Names[0].replace('/', '').replace(/-app$/, ''))
     )
 
-    const projects = store.getAll()
-    for (const [name, project] of Object.entries(projects)) {
-      if (project.sleeping && runningNames.has(name)) {
-        store.set(name, { sleeping: false })
-        log.info(`[sleep] Reconciled: ${name} is running, cleared sleeping flag`)
+    const projects = userStore.getAllProjectsGlobal()
+    for (const [fullName, project] of Object.entries(projects)) {
+      if (project.sleeping && runningNames.has(fullName)) {
+        userStore.setProject(project.userId, project.projectName, { sleeping: false })
+        log.info(`[sleep] Reconciled: ${fullName} is running, cleared sleeping flag`)
       }
     }
   } catch (err) {
@@ -124,7 +124,7 @@ async function checkIdleContainers() {
       if (!name.endsWith('-app')) continue
 
       // Skip system containers
-      if (name === 'caddy-proxy' || name === 'code-server') continue
+      if (name === 'caddy-proxy' || name === 'vps-bot-multi') continue
 
       // Check network stats for activity
       try {
@@ -161,13 +161,17 @@ async function checkIdleContainers() {
       const idleTime = now - lastActive
 
       if (idleTime >= timeoutMs) {
-        const projectName = name.replace(/-app$/, '')
+        const containerBaseName = name.replace(/-app$/, '')
         log.info(`[sleep] Stopping idle container: ${name} (idle ${Math.round(idleTime / 60000)}m)`)
 
         try {
           const container = getDocker().getContainer(c.Id)
           await container.stop()
-          store.set(projectName, { sleeping: true })
+          // Parse userId and projectName from container name: u{userId}-{projectName}
+          const match = containerBaseName.match(/^u(\d+)-(.+)$/)
+          if (match) {
+            userStore.setProject(match[1], match[2], { sleeping: true })
+          }
           log.info(`[sleep] ${name} stopped`)
         } catch (err) {
           log.error(`[sleep] Failed to stop ${name}`, err.message)
@@ -208,7 +212,11 @@ export async function wakeContainer(name) {
     const container = getDocker().getContainer(c.Id)
     await container.start()
     lastActivity.set(containerName, Date.now())
-    store.set(name, { sleeping: false })
+    // Parse userId and projectName from name
+    const match = name.match(/^u(\d+)-(.+)$/)
+    if (match) {
+      userStore.setProject(match[1], match[2], { sleeping: false })
+    }
 
     // Wait for container to be healthy
     const ok = await waitForContainer(containerName, 30_000)
@@ -286,7 +294,10 @@ function startWakeProxy() {
     const host = req.headers.host || ''
     const projectName = host.split('.')[0]
 
-    if (!projectName || !store.get(projectName)) {
+    // For multi-user, the subdomain is u{userId}-{name}
+    // Check if any project matches
+    const allProjects = userStore.getAllProjectsGlobal()
+    if (!projectName || !allProjects[projectName]) {
       res.writeHead(404)
       res.end('Not found')
       return
@@ -328,12 +339,12 @@ export function getWakePort() {
  * Get sleep status for all projects
  */
 export function getSleepStatus() {
-  const projects = store.getAll()
+  const projects = userStore.getAllProjectsGlobal()
   const result = {}
-  for (const [name, project] of Object.entries(projects)) {
-    result[name] = {
+  for (const [fullName, project] of Object.entries(projects)) {
+    result[fullName] = {
       sleeping: project.sleeping || false,
-      lastActivity: lastActivity.get(`${name}-app`) || null,
+      lastActivity: lastActivity.get(`${fullName}-app`) || null,
     }
   }
   return result

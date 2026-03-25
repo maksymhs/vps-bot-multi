@@ -1,7 +1,7 @@
 {
-  "name": "vps-bot",
+  "name": "vps-bot-multi",
   "version": "1.0.0",
-  "description": "AI-powered VPS platform — describe an app, get it running with Docker + SSL in minutes",
+  "description": "Multi-user AI deploy platform — public Telegram bot with per-user isolation, limits, and auto-sleep",
   "type": "module",
   "author": "maksymhs (https://github.com/maksymhs)",
   "license": "MIT",
@@ -10,16 +10,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/maksymhs/vps-bot.git"
+    "url": "https://github.com/maksymhs/vps-bot-multi.git"
   },
-  "keywords": ["vps", "deploy", "docker", "claude", "ai", "telegram", "code-server"],
+  "keywords": ["vps", "deploy", "docker", "claude", "ai", "telegram", "multi-user"],
   "scripts": {
-    "start": "node src/cli-home.js",
-    "bot": "node src/bot.js",
-    "dev": "node --watch src/bot.js",
-    "cli": "node src/cli.js",
-    "setup": "node src/setup.js",
-    "home": "node src/cli-home.js"
+    "start": "node src/bot.js",
+    "dev": "node --watch src/bot.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
