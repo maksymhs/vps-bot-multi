@@ -330,7 +330,10 @@ bot.action(/^nbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
   }
 
   enqueueBuild(buildKey, () => deployNew(ctx, name, state.description, model))
-    .catch(err => console.error('Deploy error:', err))
+    .catch(err => {
+      console.error('Deploy error:', err)
+      ctx.reply(`❌ *${name}* — Build failed: ${(err.message || err).toString().slice(0, 300)}`, { parse_mode: 'Markdown' }).catch(() => {})
+    })
     .finally(() => buildingSet.delete(buildKey))
 })
 
@@ -369,7 +372,10 @@ bot.action(/^rbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
     .then(ok => {
       if (ok) showProject(ctx, name).catch(() => {})
     })
-    .catch(err => console.error('Rebuild error:', err))
+    .catch(err => {
+      console.error('Rebuild error:', err)
+      ctx.reply(`❌ *${name}* — Rebuild failed: ${(err.message || err).toString().slice(0, 300)}`, { parse_mode: 'Markdown' }).catch(() => {})
+    })
     .finally(() => buildingSet.delete(buildKey))
 })
 
