@@ -51,7 +51,34 @@ bot.use((ctx, next) => {
 
 // ── Text commands ──────────────────────────────────────────────────────────
 
-bot.start((ctx) => showMain(ctx))
+bot.start(async (ctx) => {
+  const userId = ctx.from?.id
+  const count = userStore.countProjects(userId)
+
+  // Returning user → straight to menu
+  if (count > 0) return showMain(ctx)
+
+  // New user → welcome onboarding
+  const name = ctx.from?.first_name || 'there'
+  const { Markup } = await import('telegraf')
+  const text =
+    `👋 *Hey ${name}!*\n\n` +
+    `I turn your ideas into live web apps.\n\n` +
+    `*How it works:*\n` +
+    `1. Tap *New Project*\n` +
+    `2. Give it a name\n` +
+    `3. Describe what you want\n` +
+    `4. Pick an AI model\n` +
+    `5. I build & deploy it — you get a URL ✨\n\n` +
+    `_No code needed. Takes ~60 seconds._`
+  return ctx.reply(text, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🚀 Create my first app', 'new')],
+      [Markup.button.callback('📋 Main menu', 'main')],
+    ]),
+  })
+})
 
 bot.command('menu', (ctx) => showMain(ctx))
 bot.command('new', newCommand)
