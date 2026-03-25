@@ -364,12 +364,17 @@ else
 fi
 echo ""
 
-# Claude auth — exec replaces this script process so claude gets full TTY
+# Claude auth — needs a real pseudo-TTY, use 'script' to provide one
 if [ "$CLAUDE_OK" = false ] && command -v claude &>/dev/null; then
     echo -e "  ${CYAN}${BOLD}Authenticating Claude...${NC}"
     echo -e "  ${DIM}After sign-in, paste the code shown in the browser back here.${NC}"
-    echo -e "  ${DIM}The bot will restart automatically when done.${NC}"
     echo ""
-    # Use exec so claude inherits the raw TTY (no parent script holding stdin)
-    exec bash -c "claude auth login && systemctl restart vps-bot-multi && echo '' && echo '  ${GREEN}✔ Claude authenticated — bot restarted!'"
+    script -qc "claude auth login" /dev/null
+    echo ""
+    if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1; then
+        echo -e "  ${GREEN}✔${NC} Claude authenticated"
+        systemctl restart vps-bot-multi > /dev/null 2>&1 && echo -e "  ${GREEN}✔${NC} Bot restarted"
+    else
+        echo -e "  ${YELLOW}!${NC} Auth failed — run manually: ${CYAN}claude auth login${NC}"
+    fi
 fi
