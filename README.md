@@ -9,6 +9,7 @@
 <h1 align="center">vps-bot-multi</h1>
 <p align="center"><strong>Describe it. Deploy it. For everyone.</strong></p>
 <p align="center">Multi-user AI deploy platform — a public Telegram bot where anyone can describe an app and get it running with Docker + SSL.</p>
+<p align="center"><a href="https://t.me/VpsCodeBot">🤖 Try it: t.me/VpsCodeBot</a></p>
 
 ---
 
