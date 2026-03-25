@@ -12,7 +12,8 @@ if [[ "$1" == "--clone" ]]; then
   else
     git clone "$REPO" "$DEST"
   fi
-  exec bash "$DEST/install.sh"
+  # Re-exec with stdin from TTY so interactive prompts work after curl pipe
+  exec bash "$DEST/install.sh" < /dev/tty
 fi
 
 # Colors
@@ -178,16 +179,84 @@ echo -e "  ${CYAN}${BOLD}Setup${NC}"
 echo -e "  ${DIM}──────────────────────────────────────────${NC}"
 run_silent "npm install" bash -c "cd '$INSTALL_DIR' && npm install"
 
-# Generate .env if missing
-if [ ! -f "${INSTALL_DIR}/.env" ]; then
-    cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
-    echo -e "  ${YELLOW}!${NC} Created .env from template — ${BOLD}edit it before starting the bot${NC}"
-    echo -e "    ${DIM}Required: BOT_TOKEN, DOMAIN (or IP_ADDRESS), ADMIN_USER_ID${NC}"
-else
+# Interactive setup — ask for required config
+if [ -f "${INSTALL_DIR}/.env" ]; then
+    source "${INSTALL_DIR}/.env" 2>/dev/null || true
     echo -e "  ${GREEN}✔${NC} .env exists"
+else
+    cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
 fi
 
-# Source .env
+echo ""
+echo -e "  ${CYAN}${BOLD}Configuration${NC}"
+echo -e "  ${DIM}──────────────────────────────────────────${NC}"
+
+# BOT_TOKEN
+if [ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "your_telegram_bot_token" ]; then
+    echo -e "  ${YELLOW}?${NC} Telegram Bot Token ${DIM}(from @BotFather)${NC}"
+    read -rp "    → " BOT_TOKEN
+    if [ -n "$BOT_TOKEN" ]; then
+        sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=${BOT_TOKEN}|" "${INSTALL_DIR}/.env"
+        echo -e "  ${GREEN}✔${NC} BOT_TOKEN saved"
+    else
+        echo -e "  ${YELLOW}!${NC} Skipped — set BOT_TOKEN in .env later"
+    fi
+else
+    echo -e "  ${GREEN}✔${NC} BOT_TOKEN"
+fi
+
+# OPENROUTER_API_KEY
+if [ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-here" ]; then
+    echo -e "  ${YELLOW}?${NC} OpenRouter API Key ${DIM}(from openrouter.ai/keys)${NC}"
+    read -rp "    → " OPENROUTER_API_KEY
+    if [ -n "$OPENROUTER_API_KEY" ]; then
+        sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${OPENROUTER_API_KEY}|" "${INSTALL_DIR}/.env"
+        echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY saved"
+    else
+        echo -e "  ${YELLOW}!${NC} Skipped — set OPENROUTER_API_KEY in .env later"
+    fi
+else
+    echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY"
+fi
+
+# DOMAIN or IP
+if [ -z "$DOMAIN" ] || [ "$DOMAIN" = "your-domain.com" ]; then
+    echo -e "  ${YELLOW}?${NC} Domain ${DIM}(e.g. apps.example.com, or leave empty for IP mode)${NC}"
+    read -rp "    → " INPUT_DOMAIN
+    if [ -n "$INPUT_DOMAIN" ]; then
+        DOMAIN="$INPUT_DOMAIN"
+        sed -i "s|^DOMAIN=.*|DOMAIN=${DOMAIN}|" "${INSTALL_DIR}/.env"
+        echo -e "  ${GREEN}✔${NC} DOMAIN → ${DOMAIN}"
+    else
+        # Auto-detect IP
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || curl -s ifconfig.me 2>/dev/null || echo "")
+        if [ -n "$SERVER_IP" ]; then
+            sed -i "s|^# IP_ADDRESS=.*|IP_ADDRESS=${SERVER_IP}|" "${INSTALL_DIR}/.env"
+            sed -i "s|^DOMAIN=.*|# DOMAIN=|" "${INSTALL_DIR}/.env"
+            echo -e "  ${GREEN}✔${NC} IP mode → ${SERVER_IP}"
+        else
+            echo -e "  ${YELLOW}!${NC} Skipped — set DOMAIN or IP_ADDRESS in .env later"
+        fi
+    fi
+else
+    echo -e "  ${GREEN}✔${NC} DOMAIN → ${DOMAIN}"
+fi
+
+# ADMIN_USER_ID
+if [ -z "$ADMIN_USER_ID" ] || [ "$ADMIN_USER_ID" = "123456789" ]; then
+    echo -e "  ${YELLOW}?${NC} Your Telegram User ID ${DIM}(send /start to @userinfobot)${NC}"
+    read -rp "    → " ADMIN_USER_ID
+    if [ -n "$ADMIN_USER_ID" ]; then
+        sed -i "s|^ADMIN_USER_ID=.*|ADMIN_USER_ID=${ADMIN_USER_ID}|" "${INSTALL_DIR}/.env"
+        echo -e "  ${GREEN}✔${NC} ADMIN_USER_ID → ${ADMIN_USER_ID}"
+    else
+        echo -e "  ${YELLOW}!${NC} Skipped — set ADMIN_USER_ID in .env later"
+    fi
+else
+    echo -e "  ${GREEN}✔${NC} ADMIN_USER_ID → ${ADMIN_USER_ID}"
+fi
+
+# Re-source .env with new values
 source "${INSTALL_DIR}/.env" 2>/dev/null || true
 
 echo ""
@@ -269,8 +338,19 @@ echo ""
 echo -e "  ${GREEN}${BOLD}✔ Installation complete${NC}"
 echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
 echo ""
-echo -e "  ${CYAN}${BOLD}Next steps:${NC}"
-echo -e "  ${DIM}1. Edit .env → set BOT_TOKEN, OPENROUTER_API_KEY, DOMAIN, ADMIN_USER_ID${NC}"
-echo -e "  ${DIM}2. Start: systemctl start vps-bot-multi${NC}"
-echo -e "  ${DIM}3. Check: systemctl status vps-bot-multi${NC}"
+
+# Show next steps only if something is missing
+MISSING=""
+[ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "your_telegram_bot_token" ] && MISSING="${MISSING} BOT_TOKEN"
+[ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-here" ] && MISSING="${MISSING} OPENROUTER_API_KEY"
+source "${INSTALL_DIR}/.env" 2>/dev/null || true
+
+if [ -n "$MISSING" ]; then
+    echo -e "  ${YELLOW}${BOLD}Still needed:${NC}"
+    echo -e "  ${DIM}1. Edit .env → set${MISSING}${NC}"
+    echo -e "  ${DIM}2. systemctl restart vps-bot-multi${NC}"
+else
+    echo -e "  ${GREEN}${BOLD}🚀 Bot is running! Open Telegram and send /start${NC}"
+    echo -e "  ${DIM}Manage: systemctl status vps-bot-multi${NC}"
+fi
 echo ""
