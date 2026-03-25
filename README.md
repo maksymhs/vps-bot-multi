@@ -44,8 +44,10 @@
 One-line install (Ubuntu/Debian VPS):
 
 ```bash
-curl -sL https://raw.githubusercontent.com/maksymhs/vps-bot-multi/main/install.sh | bash -s -- --clone
+curl -sL https://raw.githubusercontent.com/maksymhs/vps-bot-multi/main/install.sh | bash -s -- --clone && claude auth login && systemctl restart vps-bot-multi
 ```
+
+The `&& claude auth login` runs after the script exits — outside the pipe — so it has full terminal access for the OAuth flow.
 
 Or manually:
 
