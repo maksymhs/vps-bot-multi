@@ -687,51 +687,102 @@ CMD ["npm", "start"]`
   await onStatus(`✅ Ready → ${url}`)
 }
 
+// Animated progress indicator for Telegram
+function createProgressAnimator(ctx, name, buildStart) {
+  const frames = ['◐', '◓', '◑', '◒']
+  const barFrames = ['▱▱▱▱▱', '▰▱▱▱▱', '▰▰▱▱▱', '▰▰▰▱▱', '▰▰▰▰▱', '▰▰▰▰▰']
+  let msgId = null
+  let currentText = ''
+  let currentRetry = ''
+  let frame = 0
+  let barIdx = 0
+  let timer = null
+  let stopped = false
+
+  const formatMsg = () => {
+    const elapsed = Math.round((Date.now() - buildStart) / 1000)
+    const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`
+    const spinner = frames[frame % frames.length]
+    const bar = barFrames[barIdx % barFrames.length]
+    return `${spinner} *${name}*${currentRetry}\n${currentText}\n\`${bar}\` _${timeStr}_`
+  }
+
+  const tick = async () => {
+    if (stopped || !msgId) return
+    frame++
+    // Advance bar slowly (every 2 ticks = 6s per step)
+    if (frame % 2 === 0 && barIdx < barFrames.length - 1) barIdx++
+    try {
+      await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, formatMsg(), { parse_mode: 'Markdown' })
+    } catch {}
+  }
+
+  return {
+    async update(text) {
+      currentText = text
+      // Reset bar on phase change
+      barIdx = 0
+      frame = 0
+      const fullText = formatMsg()
+      if (msgId) {
+        try {
+          await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, fullText, { parse_mode: 'Markdown' })
+        } catch {}
+      } else {
+        const msg = await ctx.reply(fullText, { parse_mode: 'Markdown' })
+        msgId = msg.message_id
+      }
+      // Start animation loop
+      if (timer) clearInterval(timer)
+      timer = setInterval(tick, 3000)
+    },
+    setRetry(attempt, max) {
+      currentRetry = ` · Retry ${attempt}/${max}`
+    },
+    resetMsg() {
+      msgId = null
+    },
+    stop() {
+      stopped = true
+      if (timer) clearInterval(timer)
+    },
+  }
+}
+
 async function deployWithRetry(ctx, dir, userId, name, description, action, model = null, mode = null) {
   let lastError = null
-  let statusMsgId = null
   const buildStart = Date.now()
   const logName = `u${userId}-${name}`
+  const anim = createProgressAnimator(ctx, name, buildStart)
 
   if (!mode) mode = action === 'new' ? 'new' : 'rebuild'
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const onStatus = async (text) => {
-      const elapsed = Math.round((Date.now() - buildStart) / 1000)
-      const timeStr = elapsed > 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`
-      const retry = attempt > 1 ? ` · Retry ${attempt}/${MAX_RETRIES}` : ''
-      const fullText = `⚙️ *${name}*${retry}\n${text} _${timeStr}_`
-
-      if (statusMsgId) {
-        try {
-          await ctx.telegram.editMessageText(ctx.chat.id, statusMsgId, null, fullText, { parse_mode: 'Markdown' })
-          return
-        } catch {}
-      }
-      const msg = await ctx.reply(fullText, { parse_mode: 'Markdown' })
-      statusMsgId = msg.message_id
+    if (attempt > 1) {
+      anim.setRetry(attempt, MAX_RETRIES)
+      anim.resetMsg()
     }
 
-    try {
-      if (attempt > 1) {
-        statusMsgId = null
-      }
+    const onStatus = (text) => anim.update(text)
 
+    try {
       await buildAndVerify(dir, userId, name, description, onStatus,
         attempt > 1 ? lastError?.message : null, model, mode)
 
+      anim.stop()
       return true
     } catch (err) {
       lastError = err
       log.error(`[${logName}] attempt ${attempt} failed`, err.message)
       if (attempt < MAX_RETRIES) {
-        statusMsgId = null
+        anim.stop()
         await ctx.reply(`⚠️ Attempt ${attempt} failed, retrying...`, { parse_mode: 'Markdown' })
         await new Promise(r => setTimeout(r, 2000))
       }
     }
   }
 
+  anim.stop()
   log.error(`[${logName}] failed after ${MAX_RETRIES} attempts`, lastError?.message)
   await ctx.reply(`❌ *${name}* — Failed after ${MAX_RETRIES} attempts`, { parse_mode: 'Markdown' })
   return false
