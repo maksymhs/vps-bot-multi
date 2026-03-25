@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  vps-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Mount Docker socket to allow managing containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount projects directory for storing project files
+      - ${PROJECTS_DIR:-./projects}:/projects
+      # Make sure PROJECTS_DIR environment variable matches this mount
+    # Use host network to access Caddy Admin API and other services on host
+    network_mode: host
+    container_name: vps-bot
+
+# Optional: Create projects directory on first run
+volumes:
+  projects:

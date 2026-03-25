@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/maksym/.local/bin/pm2 start:*)",
+      "Read",
+      "Write",
+      "Edit",
+      "Bash"
+    ],
+    "defaultMode": "acceptEdits"
+  }
+}
