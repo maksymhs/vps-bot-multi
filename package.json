@@ -15,7 +15,8 @@
   "keywords": ["vps", "deploy", "docker", "claude", "ai", "telegram", "multi-user"],
   "scripts": {
     "start": "node src/bot.js",
-    "dev": "node --watch src/bot.js"
+    "dev": "node --watch src/bot.js",
+    "config": "node src/config-cli.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
