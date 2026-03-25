@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import { Telegraf } from 'telegraf'
-import { execFile } from 'child_process'
+import { execFile, execSync } from 'child_process'
 import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl } from './commands/projects.js'
 import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild, showModelSelect } from './commands/menu.js'
 import { userStore } from './lib/user-store.js'
@@ -39,6 +39,11 @@ bot.use((ctx, next) => {
   if (config.needsAdmin) {
     config.claimAdmin(userId)
     ctx.reply(`👑 You are now the admin of this bot!\nYour ID (${userId}) has been saved.`).catch(() => {})
+  }
+
+  // Maintenance mode: only admin can use bot
+  if (userStore.maintenanceMode && !config.isAdmin(userId)) {
+    return ctx.reply('🔧 Bot is in maintenance mode. Please try again later.')
   }
 
   return next()
@@ -131,6 +136,17 @@ bot.action('status', async (ctx) => {
   const allProjects = userStore.getAllProjectsGlobal()
   const projectCount = Object.keys(allProjects).length
 
+  // Count running containers
+  let runningContainers = 0
+  try {
+    const docker = getDocker()
+    const containers = await docker.listContainers({ filters: { status: ['running'] } })
+    runningContainers = containers.filter(c => c.Names?.[0]?.includes('-app')).length
+  } catch {}
+
+  const qs = getQueueStatus()
+  const maint = userStore.maintenanceMode ? '🔴 ON' : '🟢 OFF'
+
   const text =
     `🖥 *Server Status*\n\n` +
     `*CPU:* ${pct(cpu.currentLoad)}%\n` +
@@ -138,10 +154,23 @@ bot.action('status', async (ctx) => {
     `*Disk:* ${gb(d.used)}GB / ${gb(d.size)}GB (${pct(d.use)}%)\n\n` +
     `👥 *Users:* ${userCount}\n` +
     `📦 *Total Apps:* ${projectCount}\n` +
-    `⏱ *Auto-sleep:* ${config.idleTimeout}m`
+    `🐳 *Running:* ${runningContainers} containers\n` +
+    `🔨 *Build queue:* ${qs.running}/${qs.max} active, ${qs.waiting} waiting\n` +
+    `⏱ *Auto-sleep:* ${config.idleTimeout}m\n` +
+    `🔧 *Maintenance:* ${maint}`
   await ctx.editMessageText(text, {
     parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Menu', 'main')]]),
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🛑 Stop All', 'admin_stopall'),
+        Markup.button.callback(userStore.maintenanceMode ? '▶️ Resume' : '⏸ Pause', 'admin_maint'),
+      ],
+      [
+        Markup.button.callback('👥 Users', 'admin_users'),
+        Markup.button.callback('🔄 Refresh', 'status'),
+      ],
+      [Markup.button.callback('⬅️ Menu', 'main')],
+    ]),
   })
 })
 
@@ -176,6 +205,56 @@ bot.action('admin_users', async (ctx) => {
   })
 })
 
+// Admin: stop all containers
+bot.action('admin_stopall', async (ctx) => {
+  await answer(ctx)
+  const userId = ctx.from?.id
+  if (!config.isAdmin(userId)) return
+
+  const { Markup } = await import('telegraf')
+  await ctx.editMessageText('🛑 *Stopping all app containers...*', { parse_mode: 'Markdown' })
+
+  let stopped = 0
+  try {
+    const docker = getDocker()
+    const containers = await docker.listContainers({ filters: { status: ['running'] } })
+    const appContainers = containers.filter(c => c.Names?.[0]?.includes('-app'))
+    for (const c of appContainers) {
+      try {
+        const container = docker.getContainer(c.Id)
+        await container.stop({ t: 5 })
+        stopped++
+      } catch {}
+    }
+  } catch {}
+
+  await ctx.editMessageText(`🛑 *Stopped ${stopped} containers*`, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('📊 Status', 'status'), Markup.button.callback('⬅️ Menu', 'main')],
+    ]),
+  })
+})
+
+// Admin: toggle maintenance mode (pause/resume builds)
+bot.action('admin_maint', async (ctx) => {
+  await answer(ctx)
+  const userId = ctx.from?.id
+  if (!config.isAdmin(userId)) return
+
+  const newState = !userStore.maintenanceMode
+  userStore.setMaintenance(newState)
+
+  const { Markup } = await import('telegraf')
+  const label = newState ? '⏸ *Maintenance mode ON*\nOnly admin can use the bot.' : '▶️ *Maintenance mode OFF*\nAll users can use the bot again.'
+  await ctx.editMessageText(label, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('📊 Status', 'status'), Markup.button.callback('⬅️ Menu', 'main')],
+    ]),
+  })
+})
+
 // New project
 bot.action('new', async (ctx) => { await answer(ctx); await startNewFlow(ctx) })
 
@@ -191,7 +270,8 @@ bot.action(/^rb:(.+)$/, async (ctx) => {
   const userId = ctx.from?.id
   const name = ctx.match[1]
   if (!userStore.getProject(userId, name)) return ctx.editMessageText(`Project "${name}" not found.`)
-  const buildKey = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const buildKey = `${slug}-${name}`
   if (buildingSet.has(buildKey)) return ctx.answerCbQuery('Already building...', { show_alert: true })
   await startRebuildFlow(ctx, name)
 })
@@ -319,7 +399,8 @@ bot.action(/^nbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
   if (!state || state.step !== 'model' || state.name !== name) return ctx.editMessageText('Session expired. Use /menu.')
   pendingNew.delete(ctx.chat.id)
 
-  const buildKey = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const buildKey = `${slug}-${name}`
   if (buildingSet.has(buildKey)) return ctx.answerCbQuery('Already building...', { show_alert: true })
   buildingSet.add(buildKey)
 
@@ -358,7 +439,8 @@ bot.action(/^rbm:(deepseek|llama|qwen):(.+)$/, async (ctx) => {
   const project = userStore.getProject(userId, name)
   if (!project) return ctx.editMessageText(`Project "${name}" not found.`)
 
-  const buildKey = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const buildKey = `${slug}-${name}`
   if (buildingSet.has(buildKey)) return ctx.answerCbQuery('Already building...', { show_alert: true })
   buildingSet.add(buildKey)
 

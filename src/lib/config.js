@@ -16,9 +16,9 @@ export const config = {
   get port() { return parseInt(process.env.PORT ?? '80') },
 
   // Generate project URL based on network config
-  // Multi-user: container names are u{userId}-{projectName}-app
-  projectUrl: (userId, name) => {
-    const subdomain = `u${userId}-${name}`
+  // Multi-user: uses user slug for pretty URLs (e.g. john-myapp.domain.com)
+  projectUrl: (slug, name) => {
+    const subdomain = `${slug}-${name}`
     if (process.env.DOMAIN) {
       return `https://${subdomain}.${process.env.DOMAIN}`
     } else if (process.env.IP_ADDRESS) {

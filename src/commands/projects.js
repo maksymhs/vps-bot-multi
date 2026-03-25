@@ -16,7 +16,8 @@ function getUserId(ctx) {
 }
 
 export function projectUrl(userId, name) {
-  return config.projectUrl(userId, name)
+  const slug = userStore.getUserSlug(userId)
+  return config.projectUrl(slug, name)
 }
 
 function run(cmd, args, opts = {}) {
@@ -100,7 +101,8 @@ function getNextPort(userId) {
 
 export function writeComposeFile(dir, userId, name) {
   const containerName = userStore.containerName(userId, name)
-  const subdomain = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const subdomain = `${slug}-${name}`
   let compose
   if (config.domain) {
     compose = `services:
@@ -573,7 +575,8 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   const actualModel = model || config.defaultModel
   const modelShort = actualModel.split('/').pop()
 
-  const logName = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const logName = `${slug}-${name}`
   log.info(`[${logName}] build start`, `model=${actualModel} dir=${dir} mode=${mode}`)
 
   // Template flow: sync repo, match template+components, copy files (only for new/full builds)
@@ -752,7 +755,8 @@ function createProgressAnimator(ctx, name, buildStart) {
 async function deployWithRetry(ctx, dir, userId, name, description, action, model = null, mode = null) {
   let lastError = null
   const buildStart = Date.now()
-  const logName = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const logName = `${slug}-${name}`
   const anim = createProgressAnimator(ctx, name, buildStart)
 
   if (!mode) mode = action === 'new' ? 'new' : 'rebuild'
@@ -864,7 +868,8 @@ export async function newCommand(ctx) {
     return ctx.reply(`"${name}" already exists. Use /rebuild ${name} to update it.`)
   }
 
-  const buildKey = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const buildKey = `${slug}-${name}`
   if (buildingSet.has(buildKey)) return ctx.reply(`"${name}" is already building...`)
 
   buildingSet.add(buildKey)
@@ -892,7 +897,8 @@ export async function rebuildCommand(ctx) {
   const project = userStore.getProject(userId, name)
   if (!project) return ctx.reply(`Project "${name}" not found. Use /new to create it.`)
 
-  const buildKey = `u${userId}-${name}`
+  const slug = userStore.getUserSlug(userId)
+  const buildKey = `${slug}-${name}`
   if (buildingSet.has(buildKey)) return ctx.reply(`"${name}" is already building...`)
 
   buildingSet.add(buildKey)

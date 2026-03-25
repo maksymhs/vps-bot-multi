@@ -167,10 +167,10 @@ async function checkIdleContainers() {
         try {
           const container = getDocker().getContainer(c.Id)
           await container.stop()
-          // Parse userId and projectName from container name: u{userId}-{projectName}
-          const match = containerBaseName.match(/^u(\d+)-(.+)$/)
-          if (match) {
-            userStore.setProject(match[1], match[2], { sleeping: true })
+          // Look up userId and projectName from container base name via global store
+          const projectEntry = userStore.getAllProjectsGlobal()[containerBaseName]
+          if (projectEntry) {
+            userStore.setProject(projectEntry.userId, projectEntry.projectName, { sleeping: true })
           }
           log.info(`[sleep] ${name} stopped`)
         } catch (err) {
@@ -212,10 +212,10 @@ export async function wakeContainer(name) {
     const container = getDocker().getContainer(c.Id)
     await container.start()
     lastActivity.set(containerName, Date.now())
-    // Parse userId and projectName from name
-    const match = name.match(/^u(\d+)-(.+)$/)
-    if (match) {
-      userStore.setProject(match[1], match[2], { sleeping: false })
+    // Look up userId and projectName from global store
+    const projectEntry = userStore.getAllProjectsGlobal()[name]
+    if (projectEntry) {
+      userStore.setProject(projectEntry.userId, projectEntry.projectName, { sleeping: false })
     }
 
     // Wait for container to be healthy
@@ -236,7 +236,8 @@ export async function wakeContainer(name) {
 async function waitForContainer(containerName, timeoutMs) {
   const start = Date.now()
   const projectName = containerName.replace(/-app$/, '')
-  const project = store.get(projectName)
+  const projectEntry = userStore.getAllProjectsGlobal()[projectName]
+  const project = projectEntry || null
 
   let host, port
   if (!config.domain && project?.port) {
@@ -294,7 +295,7 @@ function startWakeProxy() {
     const host = req.headers.host || ''
     const projectName = host.split('.')[0]
 
-    // For multi-user, the subdomain is u{userId}-{name}
+    // For multi-user, the subdomain is {slug}-{name}
     // Check if any project matches
     const allProjects = userStore.getAllProjectsGlobal()
     if (!projectName || !allProjects[projectName]) {

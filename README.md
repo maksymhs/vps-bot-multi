@@ -30,7 +30,7 @@
   Docker → builds & deploys in user-namespaced container
    │
    ▼
-  Caddy → https://u12345-chat.yourdomain.com ✓
+  Caddy → https://john-chat.yourdomain.com ✓
    │
    ▼
   Auto-sleep after 30 min idle → wake on request
@@ -62,8 +62,8 @@ During install it asks for **BOT_TOKEN**, **OPENROUTER_API_KEY**, **DOMAIN**, an
 | **Users** | Single (CHAT_ID) | Any Telegram user |
 | **Auth** | Private (whitelisted) | Public (auto-register) |
 | **Isolation** | Shared projects dir | Per-user directories |
-| **Container names** | `{app}-app` | `u{userId}-{app}-app` |
-| **Subdomains** | `{app}.domain.com` | `u{userId}-{app}.domain.com` |
+| **Container names** | `{app}-app` | `{username}-{app}-app` |
+| **Subdomains** | `{app}.domain.com` | `{username}-{app}.domain.com` |
 | **Limits** | Unlimited | MAX_APPS_PER_USER (configurable) |
 | **Auto-sleep** | Optional | Forced (30 min default) |
 | **Code-Server** | ✅ | Removed (public bot) |
@@ -107,8 +107,10 @@ Describe it. Deploy it.
 
 ### Admin (via inline buttons)
 
-- **📊 Server Status** — CPU, RAM, disk, user count, total apps
+- **📊 Server Status** — CPU, RAM, disk, running containers, build queue
 - **👥 Users** — list all users with app counts
+- **🛑 Stop All** — stop all running app containers
+- **⏸ Pause / ▶️ Resume** — maintenance mode (blocks non-admin users)
 
 ## Configuration
 
@@ -148,7 +150,7 @@ IDLE_TIMEOUT=30
        │           │           │
        ▼           ▼           ▼
    /projects/   OpenRouter   Stop idle
-   u_{userId}/  → Docker →   Wake on
+   {username}/  → Docker →   Wake on
    {app}/       Caddy        HTTP request
 ```
 
@@ -157,16 +159,16 @@ IDLE_TIMEOUT=30
 ```
 /home/vpsbot/projects/
 ├── users.json                    # All registered users
-├── u_12345/                      # User 12345's space
+├── john/                         # User @john's space
 │   ├── projects.json             # User's project registry
 │   ├── my-chat-app/              # Project files
 │   │   ├── src/
 │   │   ├── Dockerfile
-│   │   └── docker-compose.yml    # container: u12345-my-chat-app-app
-│   └── my-api/
-└── u_67890/                      # Another user
+│   │   └── docker-compose.yml    # container: john-my-chat-app-app
+│   └── my-api/                   # URL: john-my-api.domain.com
+└── maria/                        # User @maria's space
     ├── projects.json
-    └── todo-app/
+    └── todo-app/                 # URL: maria-todo-app.domain.com
 ```
 
 ## Project Structure
