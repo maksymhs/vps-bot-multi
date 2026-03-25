@@ -365,10 +365,12 @@ fi
 echo ""
 
 if [ "$CLAUDE_OK" = false ] && command -v claude &>/dev/null; then
-    echo -e "  ${CYAN}${BOLD}Claude not authenticated yet.${NC}"
-    echo -e "  ${DIM}Run the full one-liner to install + authenticate in one go:${NC}"
+    echo -e "  ${CYAN}${BOLD}Claude Authentication${NC}"
+    echo -e "  ${DIM}──────────────────────────────────────────${NC}"
+    echo -e "  ${YELLOW}!${NC} ${DIM}Connect via SSH (not web console) — paste works correctly in SSH${NC}"
+    echo -e "  ${DIM}  ssh root@<your-server-ip>${NC}"
     echo ""
-    echo -e "  ${BOLD}  curl -sL https://raw.githubusercontent.com/maksymhs/vps-bot-multi/main/install.sh | bash -s -- --clone && claude auth login && systemctl restart vps-bot-multi${NC}"
+    echo -e "  ${DIM}Then run:${NC}"
+    echo -e "  ${BOLD}  stty sane && TERM=xterm-256color claude auth login && systemctl restart vps-bot-multi${NC}"
     echo ""
-    echo -e "  ${DIM}Or just run: ${CYAN}claude auth login && systemctl restart vps-bot-multi${NC}"
 fi

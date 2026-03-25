@@ -289,37 +289,30 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
 
   let content = null
 
-  // Try Claude CLI first (uses ~/.claude subscription auth, no API key needed)
-  try {
-    log.build(name, 'Using Claude CLI (claude-haiku-4-5-20251001)')
-    content = await new Promise((resolve, reject) => {
-      execFile('claude', [
-        '-p', prompt,
-        '--model', 'claude-haiku-4-5-20251001',
-        '--output-format', 'json',
-        '--system-prompt', systemPrompt,
-      ], { maxBuffer: 20 * 1024 * 1024, timeout: 180000 }, (err, stdout, stderr) => {
-        if (err) return reject(Object.assign(err, { stderr: stderr || '' }))
-        try {
-          const data = JSON.parse(stdout)
-          resolve(data.result ?? stdout)
-        } catch {
-          resolve(stdout)
-        }
-      })
-    })
-    log.build(name, 'Claude CLI response length:', content?.length)
-  } catch (err) {
-    const errText = (err.message + (err.stderr || '')).toLowerCase()
-    const isRateLimit = errText.includes('rate_limit') || errText.includes('overloaded') || errText.includes('429')
-    const isUnavailable = errText.includes('not found') || errText.includes('enoent') || errText.includes('command not found')
+  // Try Claude Haiku first via API key
+  if (config.claudeApiKey) {
+    try {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk')
+      const client = new Anthropic({ apiKey: config.claudeApiKey })
+      log.build(name, 'Using Claude Haiku (claude-haiku-4-5-20251001)')
 
-    if ((isRateLimit || isUnavailable) && config.openrouterKey) {
-      const reason = isUnavailable ? 'Claude CLI no disponible' : 'Claude saturado'
-      log.build(name, `${reason}, fallback → OpenRouter DeepSeek`)
-      if (onProgress) await onProgress(`⚠️ ${reason} — usando DeepSeek como alternativa...`)
-    } else {
-      throw err
+      const message = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 16384,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: prompt }],
+      })
+
+      content = message.content[0]?.text
+      log.build(name, 'Claude response length:', content?.length)
+    } catch (err) {
+      const isRateLimit = err.status === 429 || err.message?.includes('rate_limit') || err.message?.includes('overloaded')
+      if (isRateLimit && config.openrouterKey) {
+        log.build(name, 'Claude rate limited, fallback → OpenRouter DeepSeek')
+        if (onProgress) await onProgress('⚠️ Claude saturado — usando DeepSeek como alternativa...')
+      } else {
+        throw err
+      }
     }
   }
 

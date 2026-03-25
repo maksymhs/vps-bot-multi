@@ -60,7 +60,10 @@ export const config = {
   // Multi-user limits
   get maxAppsPerUser() { return parseInt(process.env.MAX_APPS_PER_USER ?? '3') },
 
-  // OpenRouter API — fallback when Claude CLI is rate-limited or unavailable
+  // Claude API key — primary (Haiku model)
+  get claudeApiKey() { return process.env.ANTHROPIC_API_KEY || undefined },
+
+  // OpenRouter API — fallback when Claude is rate-limited
   get openrouterKey() { return process.env.OPENROUTER_API_KEY || undefined },
 
   // Build concurrency
