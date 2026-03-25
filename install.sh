@@ -346,27 +346,9 @@ echo ""
 echo -e "  ${GREEN}${BOLD}✔ Installation complete${NC}"
 echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
 
-# Claude auth — do this last since it opens a browser
-echo ""
-echo -e "  ${CYAN}${BOLD}Claude Authentication${NC}"
-echo -e "  ${DIM}──────────────────────────────────────────${NC}"
-if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1; then
-    echo -e "  ${GREEN}✔${NC} Claude already authenticated"
-else
-    echo -e "  ${YELLOW}?${NC} Authenticate Claude ${DIM}(opens browser for OAuth — uses your Claude subscription)${NC}"
-    echo ""
-    claude auth login </dev/tty >/dev/tty 2>/dev/tty
-    echo ""
-    if claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1; then
-        echo -e "  ${GREEN}✔${NC} Claude authenticated"
-        systemctl restart vps-bot-multi > /dev/null 2>&1 || true
-    else
-        echo -e "  ${YELLOW}!${NC} Skipped — run ${CYAN}claude auth login${NC} then ${CYAN}systemctl restart vps-bot-multi${NC}"
-    fi
-fi
-
 echo ""
 source "${INSTALL_DIR}/.env" 2>/dev/null || true
+
 CLAUDE_OK=false
 command -v claude &>/dev/null && claude -p "ok" --model claude-haiku-4-5-20251001 --output-format json > /dev/null 2>&1 && CLAUDE_OK=true
 
@@ -377,8 +359,15 @@ if [ "$BOT_MISSING" = false ] && [ "$CLAUDE_OK" = true ]; then
     echo -e "  ${GREEN}${BOLD}Bot is running! Open Telegram and send /start${NC}"
     echo -e "  ${DIM}Manage: systemctl status vps-bot-multi${NC}"
 else
-    echo -e "  ${YELLOW}${BOLD}Still needed:${NC}"
-    [ "$BOT_MISSING" = true ] && echo -e "  ${DIM}• Edit .env → set BOT_TOKEN, then: systemctl restart vps-bot-multi${NC}"
-    [ "$CLAUDE_OK" = false ] && echo -e "  ${DIM}• Run: ${CYAN}claude auth login${NC}  then: ${CYAN}systemctl restart vps-bot-multi${NC}"
+    echo -e "  ${YELLOW}${BOLD}Next steps:${NC}"
+    [ "$BOT_MISSING" = true ] && echo -e "  ${DIM}• Edit .env → set BOT_TOKEN${NC}"
+    if [ "$CLAUDE_OK" = false ]; then
+        echo -e ""
+        echo -e "  ${CYAN}• Authenticate Claude (run this manually):${NC}"
+        echo -e "  ${BOLD}    claude auth login${NC}"
+        echo -e ""
+        echo -e "  ${DIM}  Then restart the bot:${NC}"
+        echo -e "  ${DIM}    systemctl restart vps-bot-multi${NC}"
+    fi
 fi
 echo ""
