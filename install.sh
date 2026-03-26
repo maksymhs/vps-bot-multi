@@ -274,6 +274,37 @@ if ! docker network ls --format '{{.Name}}' | grep -qx 'caddy'; then
     run_silent "Docker network 'caddy'" docker network create caddy
 fi
 
+# Pre-pull node:20-alpine so first user build skips the download
+run_silent "Pre-pulling node:20-alpine" docker pull node:20-alpine
+
+# Pre-warm BuildKit npm cache with the most common packages.
+# This populates /root/.npm so the first real app build is fast.
+WARMUP_DIR=$(mktemp -d)
+cat > "${WARMUP_DIR}/package.json" << 'PKGJSON'
+{
+  "name": "vpsbot-warmup",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "express": "^4",
+    "cors": "^2",
+    "dotenv": "^16",
+    "helmet": "^7",
+    "uuid": "^9",
+    "node-fetch": "^3"
+  }
+}
+PKGJSON
+cat > "${WARMUP_DIR}/Dockerfile" << 'WARMUPEOF'
+# syntax=docker/dockerfile:1
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json ./
+RUN --mount=type=cache,target=/root/.npm npm install --omit=dev
+WARMUPEOF
+run_silent "Pre-warming npm cache" bash -c "DOCKER_BUILDKIT=1 docker build -t vpsbot-warmup:tmp '${WARMUP_DIR}' && docker rmi vpsbot-warmup:tmp"
+rm -rf "${WARMUP_DIR}"
+
 # Network setup
 NODE_BIN=$(which node)
 PROJECTS_DIR="${PROJECTS_DIR:-/home/vpsbot/projects}"

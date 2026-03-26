@@ -162,7 +162,7 @@ function buildClaudePrompt(name, description, errorContext = null, templateInfo 
     `- src/routes/          → Separate routes if the app has multiple endpoints\n` +
     `- src/public/          → Static files (CSS, client JS, images) if applicable\n` +
     `- package.json         → name "${name}", "type": "module", scripts.start "node src/index.js"\n` +
-    `- Dockerfile           → FROM node:20-alpine, WORKDIR /app, COPY package*.json ., RUN --mount=type=cache,target=/root/.npm npm install --omit=dev, COPY . ., EXPOSE 3000, CMD ["node","src/index.js"]\n` +
+    `- Dockerfile           → First line: "# syntax=docker/dockerfile:1", then: FROM node:20-alpine, WORKDIR /app, COPY package*.json ., RUN --mount=type=cache,target=/root/.npm npm install --omit=dev, COPY . ., EXPOSE 3000, CMD ["node","src/index.js"]\n` +
     `- .dockerignore        → node_modules, .git, .env, *.md\n` +
     `- .gitignore           → node_modules/, .env, dist/\n\n` +
     `RULES:\n` +
