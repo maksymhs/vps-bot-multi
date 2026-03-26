@@ -43,10 +43,19 @@ p{color:#71717a;font-size:.875rem;line-height:1.6;max-width:280px;margin:0 auto}
   <p>AI is generating your code.<br>This page will update automatically.</p>
 </div>
 <script>
+let _fails=0,_wasLoading=false
 setInterval(async()=>{
-  try{const r=await fetch('/health');const d=await r.json();if(!d.loading)location.reload()}catch(e){}
+  try{
+    const r=await fetch('/health?_='+Date.now())
+    const d=await r.json()
+    if(d.loading){_wasLoading=true;_fails=0;return}
+    location.reload()
+  }catch(e){
+    // container is rebuilding — after enough failures, reload to catch real app
+    if(_wasLoading&&++_fails>15)location.reload()
+  }
 },2000)
-setTimeout(()=>location.reload(),30000)
+setTimeout(()=>location.reload(),600000)
 </script>
 </body>
 </html>`
@@ -318,6 +327,52 @@ function fixUnicodeChars(dir) {
   } catch { /* ignore */ }
 }
 
+// Rewrite direct named imports to use barrel index when available.
+// Fixes AI habit of: import { CartoonSun } from './components/3d/CartoonSun'
+// when only default export exists in that file but barrel re-exports it as named.
+function fixComponentImports(dir) {
+  try {
+    const jsFiles = []
+    const scanDir = join(dir, 'src')
+    function scan(d) {
+      try {
+        for (const entry of readdirSync(d, { withFileTypes: true })) {
+          if (entry.name === 'node_modules') continue
+          const full = join(d, entry.name)
+          if (entry.isDirectory()) scan(full)
+          else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) jsFiles.push(full)
+        }
+      } catch {}
+    }
+    if (existsSync(scanDir)) scan(scanDir)
+
+    for (const filePath of jsFiles) {
+      let content
+      try { content = readFileSync(filePath, 'utf8') } catch { continue }
+
+      // Match named imports whose path ends with a capitalized segment (component name)
+      // e.g. import { CartoonSun } from './components/3d/CartoonSun'
+      //   or import { CartoonSun } from './components/3d/CartoonSun.jsx'
+      const importRe = /^(import\s+\{[^}]+\}\s+from\s+['"])(\.[^'"]+\/[A-Z][^'"]*)(['"])/gm
+      const modified = content.replace(importRe, (match, prefix, importPath, suffix) => {
+        const parentDir = dirname(join(dirname(filePath), importPath))
+        if (existsSync(join(parentDir, 'index.js'))) {
+          // Use the directory barrel instead
+          return `${prefix}${dirname(importPath)}${suffix}`
+        }
+        return match
+      })
+
+      if (modified !== content) {
+        writeFileSync(filePath, modified)
+        log.build(dir.split('/').pop(), `Fixed barrel imports in ${filePath.replace(dir + '/', '')}`)
+      }
+    }
+  } catch (err) {
+    log.error('[fixComponentImports]', err.message)
+  }
+}
+
 function getExistingFiles(dir) {
   try {
     const entries = execSync(`find ${JSON.stringify(dir)} -type f -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null || true`, {
@@ -563,6 +618,7 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
   } catch {}
 
   fixUnicodeChars(dir)
+  fixComponentImports(dir)
 }
 
 function parseMultiFileContent(content) {
