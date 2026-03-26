@@ -1,14 +1,14 @@
 <p align="center">
   <img src="https://img.shields.io/badge/node-20-339933?logo=node.js&logoColor=white" />
   <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" />
-  <img src="https://img.shields.io/badge/openrouter-AI-D97706?logo=data:image/svg+xml;base64,&logoColor=white" />
+  <img src="https://img.shields.io/badge/DeepSeek-V3-D97706?logoColor=white" />
   <img src="https://img.shields.io/badge/telegram-bot-26A5E4?logo=telegram&logoColor=white" />
   <img src="https://img.shields.io/badge/license-MIT-green" />
 </p>
 
 <h1 align="center">vps-bot-multi</h1>
 <p align="center"><strong>Describe it. Deploy it. For everyone.</strong></p>
-<p align="center">Multi-user AI deploy platform — a public Telegram bot where anyone can describe an app and get it running with Docker + SSL.</p>
+<p align="center">Multi-user AI deploy platform — a public Telegram bot where anyone can describe an app and get it running on your VPS with Docker + SSL in under 20 seconds.</p>
 <p align="center"><a href="https://t.me/VpsCodeBot">🤖 Try it: t.me/VpsCodeBot</a></p>
 
 ---
@@ -25,13 +25,13 @@
   Template matching → selects best starter template
    │
    ▼
-  OpenRouter API → generates full project (DeepSeek, Llama, Qwen)
-   │
+  DeepSeek V3 (streaming) → auto-names project + generates all files
+   │                         writes each file to disk as it arrives
    ▼
-  Docker → builds & deploys in user-namespaced container
-   │
+  Docker build starts in parallel → npm install runs while AI
+   │                                 is still generating source files
    ▼
-  Caddy → https://john-chat.yourdomain.com ✓
+  Caddy → https://john-chat.yourdomain.com ✓  (~15-20s total)
    │
    ▼
   Auto-sleep after 30 min idle → wake on request
@@ -39,52 +39,77 @@
 
 **No server interaction needed after initial install.** Users find your bot on Telegram and start building.
 
+---
+
 ## Quick Start
 
-One-line install (Ubuntu/Debian VPS):
+One-line install on any Ubuntu/Debian VPS:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/maksymhs/vps-bot-multi/main/install.sh | bash -s -- --clone && claude auth login && systemctl restart vps-bot-multi
+curl -fsSL https://raw.githubusercontent.com/maksymhs/vps-bot-multi/main/install.sh | bash -s -- --clone
 ```
 
-The `&& claude auth login` runs after the script exits — outside the pipe — so it has full terminal access for the OAuth flow.
-
-Or manually:
+Or if you already cloned the repo:
 
 ```bash
-git clone https://github.com/maksymhs/vps-bot-multi.git && cd vps-bot-multi && bash install.sh
+bash install.sh
 ```
 
-The installer handles Node.js, Docker, Caddy, user setup, and systemd service.
-During install it asks for **BOT_TOKEN**, **OPENROUTER_API_KEY**, **DOMAIN**, and **ADMIN_USER_ID** interactively — no manual `.env` editing needed.
+The installer handles Node.js, Docker, Caddy, user setup, system service, and pre-warms the Docker build cache.
+During install it asks interactively for **BOT_TOKEN**, **OPENROUTER_API_KEY**, **DOMAIN**, and **ADMIN_USER_ID**.
 
-## Key Differences from vps-bot
+### Skip the wizard on reinstalls
 
-| Feature | vps-bot | vps-bot-multi |
-|---|---|---|
-| **Users** | Single (CHAT_ID) | Any Telegram user |
-| **Auth** | Private (whitelisted) | Public (auto-register) |
-| **Isolation** | Shared projects dir | Per-user directories |
-| **Container names** | `{app}-app` | `{username}-{app}-app` |
-| **Subdomains** | `{app}.domain.com` | `{username}-{app}.domain.com` |
-| **Limits** | Unlimited | MAX_APPS_PER_USER (configurable) |
-| **Auto-sleep** | Optional | Forced (30 min default) |
-| **Code-Server** | ✅ | Removed (public bot) |
-| **Git integration** | ✅ | Removed (public bot) |
-| **CLI** | ✅ | Removed (Telegram only) |
-| **Admin panel** | — | Server status + user management |
+After the first install, save your credentials to `~/.vpsbot` — the script offers this automatically:
+
+```
+💾 Save credentials to ~/.vpsbot to skip this wizard next time? [Y/n]
+```
+
+Every subsequent install sources `~/.vpsbot` and skips all prompts entirely.
+You can also create it manually:
+
+```bash
+cat > ~/.vpsbot << 'EOF'
+BOT_TOKEN=your_token
+OPENROUTER_API_KEY=sk-or-v1-your-key
+DOMAIN=apps.example.com
+ADMIN_USER_ID=123456789
+EOF
+chmod 600 ~/.vpsbot
+```
+
+---
 
 ## Features
 
 - **Auto-registration** — users are created automatically on first `/start`
+- **Auto-named projects** — DeepSeek generates a short slug from the description; no name step
 - **Per-user isolation** — each user has their own directory, projects, and containers
 - **Configurable limits** — `MAX_APPS_PER_USER` in `.env` (default: 3)
 - **Forced auto-sleep** — idle containers stop after 30 min, wake on HTTP request
 - **Admin panel** — server status, user list, ban/unban (for ADMIN_USER_ID)
-- **AI-powered builds** — OpenRouter API generates apps from descriptions (cheap!)
+- **AI-powered builds** — DeepSeek V3 via OpenRouter, extremely cheap per build
+- **Streaming generation** — files written to disk as they arrive, not after full response
+- **Parallel Docker build** — `npm install` starts the moment `package.json` + `Dockerfile` land
+- **Build cache warmup** — install pre-pulls `node:20-alpine` and warms the npm cache
 - **Build queue** — `MAX_CONCURRENT_BUILDS` prevents server overload
 - **Template matching** — accelerated builds with template boilerplate
-- **Model selection** — DeepSeek, Llama, or Qwen per build
+
+---
+
+## Build Speed
+
+| Scenario | Time |
+|---|---|
+| First build (cold server) | ~30-45s |
+| First build (after install warmup) | **~15-20s** |
+| Rebuild (code changes only) | **~10-15s** |
+| Rebuild (no dependency changes) | **~6-8s** |
+
+The key optimisation: AI streams files one by one. Docker starts building the moment `package.json` + `Dockerfile` arrive — so `npm install` runs in parallel with the remaining source files being generated.
+
+---
 
 ## Telegram Bot
 
@@ -97,33 +122,40 @@ Describe it. Deploy it.
 [➕ New Project]
 ```
 
-### User Commands
+### User Flow
+
+1. Tap **➕ New Project**
+2. Describe what the app should do
+3. Bot auto-generates a name, deploys, and returns the URL — done
+
+### Commands
 
 | Command | Description |
 |---|---|
 | `/start` | Main menu |
-| `/new <name> <desc>` | Create project |
-| `/rebuild <name>` | Rebuild project |
 | `/list` | List your projects |
 | `/url <name>` | Get project URL |
+| `/rebuild <name>` | Rebuild project |
 | `/delete <name>` | Delete project |
 
-### Admin (via inline buttons)
+### Admin (inline buttons)
 
 - **📊 Server Status** — CPU, RAM, disk, running containers, build queue
 - **👥 Users** — list all users with app counts
-- **🛑 Stop All** — stop all running app containers
+- **🛑 Stop All** — stop all running containers
 - **⏸ Pause / ▶️ Resume** — maintenance mode (blocks non-admin users)
+
+---
 
 ## Configuration
 
-All via `.env`:
+All via `.env` (written automatically by the installer):
 
 ```bash
 # Required
 BOT_TOKEN=your_telegram_bot_token
-OPENROUTER_API_KEY=sk-or-v1-your-key
-DOMAIN=your-domain.com
+OPENROUTER_API_KEY=sk-or-v1-your-key   # get from openrouter.ai/keys
+DOMAIN=your-domain.com                 # or leave blank for IP mode
 
 # Admin
 ADMIN_USER_ID=123456789
@@ -131,11 +163,10 @@ ADMIN_USER_ID=123456789
 # Limits & concurrency
 MAX_APPS_PER_USER=3
 MAX_CONCURRENT_BUILDS=2
-IDLE_TIMEOUT=30
-
-# Optional: override default model
-# DEFAULT_MODEL=deepseek/deepseek-chat-v3-0324
+IDLE_TIMEOUT=30                        # minutes before container sleeps
 ```
+
+---
 
 ## Architecture
 
@@ -149,10 +180,10 @@ IDLE_TIMEOUT=30
        ┌───────────┼───────────┐
        │           │           │
    Auto-register  Build       Auto-sleep
-   (user-store)    │  (queue)   (30 min)
+   (user-store)   (queue)      (30 min)
        │           │           │
        ▼           ▼           ▼
-   /projects/   OpenRouter   Stop idle
+   /projects/   DeepSeek V3  Stop idle
    {username}/  → Docker →   Wake on
    {app}/       Caddy        HTTP request
 ```
@@ -164,50 +195,54 @@ IDLE_TIMEOUT=30
 ├── users.json                    # All registered users
 ├── john/                         # User @john's space
 │   ├── projects.json             # User's project registry
-│   ├── my-chat-app/              # Project files
+│   ├── chat-rooms/               # Auto-named from description
 │   │   ├── src/
 │   │   ├── Dockerfile
-│   │   └── docker-compose.yml    # container: john-my-chat-app-app
-│   └── my-api/                   # URL: john-my-api.domain.com
-└── maria/                        # User @maria's space
+│   │   └── docker-compose.yml    # container: john-chat-rooms-app
+│   └── task-tracker/             # URL: john-task-tracker.domain.com
+└── maria/
     ├── projects.json
-    └── todo-app/                 # URL: maria-todo-app.domain.com
+    └── weather-bot/              # URL: maria-weather-bot.domain.com
 ```
+
+---
 
 ## Project Structure
 
 ```
 vps-bot-multi/
 ├── src/
-│   ├── bot.js              # Telegram bot (public, multi-user)
+│   ├── bot.js              # Telegram bot, conversation state machine
 │   ├── commands/
-│   │   ├── projects.js     # AI generation + Docker deploy (namespaced)
-│   │   └── menu.js         # Inline keyboard menus (per-user)
+│   │   ├── projects.js     # AI generation + Docker deploy + streaming
+│   │   └── menu.js         # Inline keyboard menus
 │   └── lib/
 │       ├── config.js       # Environment config + limits
 │       ├── user-store.js   # Per-user project store + user management
 │       ├── docker-client.js # Dockerode singleton
-│       ├── sleep-manager.js # Auto-sleep + wake proxy (multi-user)
+│       ├── sleep-manager.js # Auto-sleep + wake proxy
 │       ├── build-state.js  # In-progress build tracking
-│       ├── build-queue.js  # Concurrency limiter (MAX_CONCURRENT_BUILDS)
-│       ├── usage.js        # API usage tracking
+│       ├── build-queue.js  # Concurrency limiter
 │       ├── logger.js       # Centralized logging
 │       ├── templates.js    # Template sync, matching & boilerplate
 │       ├── branding.js     # Branding
 │       └── caddy.js        # Caddy admin API
-├── logs/                   # All logs
-├── docker-compose.yml      # Self-deploy
-├── .env.example            # Configuration template
+├── logs/
+├── .env.example
 └── package.json
 ```
 
+---
+
 ## Requirements
 
-- **VPS** with 2+ GB RAM (Ubuntu/Debian recommended)
-- **Root access** (projects owned by `vpsbot` user)
-- **Ports** 80 and 443 open (for domain mode)
-- **OpenRouter API key** from [openrouter.ai](https://openrouter.ai)
-- **Telegram Bot Token** from @BotFather
+- **VPS** — 1+ GB RAM (Ubuntu/Debian recommended)
+- **Root access** — projects are owned by the `vpsbot` system user
+- **Ports 80 + 443** open (for domain mode with HTTPS)
+- **OpenRouter API key** — [openrouter.ai/keys](https://openrouter.ai/keys)
+- **Telegram Bot Token** — from [@BotFather](https://t.me/BotFather)
+
+---
 
 ## License
 
