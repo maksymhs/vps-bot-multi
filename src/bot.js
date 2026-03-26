@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import { Telegraf } from 'telegraf'
-import { execFile, execSync } from 'child_process'
+import { execFile } from 'child_process'
 import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl } from './commands/projects.js'
 import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild } from './commands/menu.js'
 import { userStore } from './lib/user-store.js'
@@ -461,17 +461,12 @@ reconcileSleepState().catch(err => console.error('Reconcile error:', err.message
 startSleepManager()
 console.log(getBanner())
 
-// Check Claude CLI availability at startup
-try {
-  execSync('claude --version', { stdio: 'pipe' })
-  console.log(chalk.green('✔ Claude CLI detected — primary code generation ready'))
-} catch {
-  if (config.openrouterKey) {
-    console.log(chalk.yellow('⚠ Claude CLI not found — using OpenRouter DeepSeek as primary'))
-  } else {
-    console.log(chalk.red('✘ Claude CLI not found and no OPENROUTER_API_KEY set — code generation unavailable!'))
-    console.log(chalk.dim('  Install Claude: https://claude.ai/download  or set OPENROUTER_API_KEY in .env'))
-  }
+// Check OpenRouter API key at startup
+if (config.openrouterKey) {
+  console.log(chalk.green('✔ OPENROUTER_API_KEY set — code generation ready (DeepSeek)'))
+} else {
+  console.log(chalk.red('✘ OPENROUTER_API_KEY not set — code generation unavailable!'))
+  console.log(chalk.dim('  Set OPENROUTER_API_KEY in .env'))
 }
 
 console.log(chalk.green('Bot started successfully.\n'))

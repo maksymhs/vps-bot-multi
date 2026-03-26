@@ -287,71 +287,39 @@ file contents here
 
 Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
-  let content = null
+  if (!config.openrouterKey) throw new Error('No AI provider available (set OPENROUTER_API_KEY in .env)')
 
-  // Try Claude Haiku first via API key
-  if (config.claudeApiKey) {
-    try {
-      const { default: Anthropic } = await import('@anthropic-ai/sdk')
-      const client = new Anthropic({ apiKey: config.claudeApiKey })
-      log.build(name, 'Using Claude Haiku (claude-haiku-4-5-20251001)')
+  const model = 'deepseek/deepseek-chat-v3-0324'
+  log.build(name, `Using OpenRouter: ${model}`)
 
-      const message = await client.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 16384,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: prompt }],
-      })
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${config.openrouterKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://vps-bot-multi.local',
+      'X-Title': 'VPS-Bot-Multi',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 16384,
+    }),
+  })
 
-      content = message.content[0]?.text
-      log.build(name, 'Claude response length:', content?.length)
-    } catch (err) {
-      const isRateLimit = err.status === 429 || err.message?.includes('rate_limit') || err.message?.includes('overloaded')
-      if (isRateLimit && config.openrouterKey) {
-        log.build(name, 'Claude rate limited, fallback → OpenRouter DeepSeek')
-        if (onProgress) await onProgress('⚠️ Claude saturado — usando DeepSeek como alternativa...')
-      } else {
-        throw err
-      }
-    }
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`)
   }
 
-  // Fallback: OpenRouter DeepSeek
-  if (!content) {
-    if (!config.openrouterKey) throw new Error('No AI provider available (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY)')
+  const data = await response.json()
+  const content = data.choices?.[0]?.message?.content
 
-    const fallbackModel = 'deepseek/deepseek-chat-v3-0324'
-    log.build(name, `Using OpenRouter fallback: ${fallbackModel}`)
-
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${config.openrouterKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://vps-bot-multi.local',
-        'X-Title': 'VPS-Bot-Multi',
-      },
-      body: JSON.stringify({
-        model: fallbackModel,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt },
-        ],
-        max_tokens: 16384,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`)
-    }
-
-    const data = await response.json()
-    content = data.choices?.[0]?.message?.content
-
-    if (!content) throw new Error('OpenRouter returned no content')
-    log.build(name, 'OpenRouter response length:', content.length)
-  }
+  if (!content) throw new Error('OpenRouter returned no content')
+  log.build(name, 'OpenRouter response length:', content.length)
 
   // Parse structured file output: --- FILE: path --- ... --- END FILE ---
   let filesWritten = 0

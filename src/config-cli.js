@@ -81,18 +81,9 @@ async function main() {
   // Show current config
   console.log('')
   console.log(`  ${C.bold}Current config:${C.reset}`)
-  let claudeCliStatus
-  try {
-    const ver = execSync('claude --version', { encoding: 'utf8', stdio: 'pipe' }).trim()
-    claudeCliStatus = `✔ ${ver}`
-  } catch {
-    claudeCliStatus = '✘ not found'
-  }
-
   const keys = [
-    ['claude CLI (primary)', claudeCliStatus],
     ['BOT_TOKEN', env.BOT_TOKEN ? '✔ set' : '✘ missing'],
-    ['OPENROUTER_API_KEY (fallback)', env.OPENROUTER_API_KEY && env.OPENROUTER_API_KEY !== 'sk-or-v1-your-key-here' ? '✔ set' : '✘ not set'],
+    ['OPENROUTER_API_KEY', env.OPENROUTER_API_KEY && env.OPENROUTER_API_KEY !== 'sk-or-v1-your-key-here' ? '✔ set' : '✘ not set'],
     ['DOMAIN', env.DOMAIN && env.DOMAIN !== 'your-domain.com' ? env.DOMAIN : (env.IP_ADDRESS || '✘ not set')],
     ['ADMIN_USER_ID', env.ADMIN_USER_ID && env.ADMIN_USER_ID !== '123456789' ? env.ADMIN_USER_ID : 'auto-detect'],
     ['MAX_APPS_PER_USER', env.MAX_APPS_PER_USER || '3'],
@@ -110,7 +101,7 @@ async function main() {
   // Menu
   console.log(`\n  ${C.bold}What to edit?${C.reset}`)
   console.log(`  ${C.dim}1${C.reset} BOT_TOKEN`)
-  console.log(`  ${C.dim}2${C.reset} OPENROUTER_API_KEY ${C.dim}(fallback when Claude is rate-limited)${C.reset}`)
+  console.log(`  ${C.dim}2${C.reset} OPENROUTER_API_KEY ${C.dim}(DeepSeek — AI code generation)${C.reset}`)
   console.log(`  ${C.dim}3${C.reset} DOMAIN / IP`)
   console.log(`  ${C.dim}4${C.reset} ADMIN_USER_ID`)
   console.log(`  ${C.dim}5${C.reset} MAX_APPS_PER_USER`)

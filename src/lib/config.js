@@ -6,7 +6,7 @@ export const config = {
   // Paths
   projectsDir: process.env.PROJECTS_DIR ?? '/home/vpsbot/projects',
   get usageFile() {
-    return join(process.cwd(), '.claude-usage.json')
+    return join(process.cwd(), '.usage.json')
   },
 
   // Network configuration
@@ -60,10 +60,7 @@ export const config = {
   // Multi-user limits
   get maxAppsPerUser() { return parseInt(process.env.MAX_APPS_PER_USER ?? '3') },
 
-  // Claude API key — primary (Haiku model)
-  get claudeApiKey() { return process.env.ANTHROPIC_API_KEY || undefined },
-
-  // OpenRouter API — fallback when Claude is rate-limited
+  // OpenRouter API key (DeepSeek model)
   get openrouterKey() { return process.env.OPENROUTER_API_KEY || undefined },
 
   // Build concurrency
