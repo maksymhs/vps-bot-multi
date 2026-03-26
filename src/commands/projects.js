@@ -315,7 +315,7 @@ export async function generateProjectName(description, userId) {
   return candidate
 }
 
-async function generateCode(dir, name, description, onProgress = null, errorContext = null, _model = null, mode = 'new', templateInfo = null) {
+async function generateCode(dir, name, description, onProgress = null, errorContext = null, _model = null, mode = 'new', templateInfo = null, onFilesReady = null) {
   const existingFiles = (mode === 'patch') ? getExistingFiles(dir) : []
   const prompt = (mode === 'patch')
     ? buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
@@ -338,7 +338,7 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
   if (!config.openrouterKey) throw new Error('No AI provider available (set OPENROUTER_API_KEY in .env)')
 
   const model = 'deepseek/deepseek-chat-v3-0324'
-  log.build(name, `Using OpenRouter: ${model}`)
+  log.build(name, `Using OpenRouter: ${model} (streaming)`)
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -355,6 +355,7 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
         { role: 'user', content: prompt },
       ],
       max_tokens: 16384,
+      stream: true,
     }),
   })
 
@@ -363,51 +364,106 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
     throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`)
   }
 
-  const data = await response.json()
-  const content = data.choices?.[0]?.message?.content
+  // ── Streaming parser ─────────────────────────────────────────────────────
+  // Write each file to disk the moment its --- END FILE --- marker arrives.
+  // When package.json + Dockerfile are both ready, fire onFilesReady() so the
+  // caller can start a background Docker build (npm install) in parallel with
+  // the remaining code still being generated.
 
-  if (!content) throw new Error('OpenRouter returned no content')
-  log.build(name, 'OpenRouter response length:', content.length)
-
-  // Parse structured file output: --- FILE: path --- ... --- END FILE ---
+  const writtenFiles = new Set()
+  let fullContent = ''       // accumulated for fallback parsing
   let filesWritten = 0
-  const filePattern = /---\s*FILE:\s*([^\s-][^\n]*?)\s*---\n([\s\S]*?)\n---\s*END FILE\s*---/g
-  let match
-  while ((match = filePattern.exec(content)) !== null) {
-    const filename = match[1].trim()
-    const fileContent = match[2]
+  let currentFile = null
+  let contentLines = []
+  let earlyBuildFired = false
+
+  const writeFile = (filename, fileContent) => {
+    if (!filename || filename.includes('..')) return
     const filePath = join(dir, filename)
     mkdirSync(dirname(filePath), { recursive: true })
     writeFileSync(filePath, fileContent)
+    writtenFiles.add(filename)
     filesWritten++
-    log.build(name, `  wrote: ${filename} (${fileContent.length}B)`)
-  }
+    log.build(name, `  wrote (stream): ${filename} (${fileContent.length}B)`)
 
-  // Fallback: try markdown code blocks with filename comments
-  if (filesWritten === 0) {
-    const files = parseMultiFileContent(content)
-    const entries = Object.entries(files)
-    if (entries.length > 0) {
-      for (const [filename, fileContent] of entries) {
-        const filePath = join(dir, filename)
-        mkdirSync(dirname(filePath), { recursive: true })
-        writeFileSync(filePath, fileContent)
-        filesWritten++
-      }
+    if (!earlyBuildFired && writtenFiles.has('package.json') && writtenFiles.has('Dockerfile')) {
+      earlyBuildFired = true
+      onFilesReady?.()
     }
   }
 
-  // Last resort: dump as single index.js
+  const commitFile = () => {
+    if (!currentFile) return
+    writeFile(currentFile, contentLines.join('\n'))
+    currentFile = null
+    contentLines = []
+  }
+
+  const processLine = (line) => {
+    const startMatch = line.match(/^---\s*FILE:\s*(.+?)\s*---$/)
+    if (startMatch) { commitFile(); currentFile = startMatch[1].trim(); contentLines = []; return }
+    if (/^---\s*END FILE\s*---$/.test(line)) { commitFile(); return }
+    if (currentFile !== null) contentLines.push(line)
+  }
+
+  // Read SSE stream, buffer incomplete lines on both levels
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let sseBuffer  = ''   // raw SSE chunks
+  let textBuffer = ''   // decoded AI text
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    sseBuffer += decoder.decode(value, { stream: true })
+    const sseLines = sseBuffer.split('\n')
+    sseBuffer = sseLines.pop()   // keep the incomplete trailing line
+
+    for (const sseLine of sseLines) {
+      if (!sseLine.startsWith('data: ')) continue
+      const data = sseLine.slice(6).trim()
+      if (data === '[DONE]') continue
+      try {
+        const chunk = JSON.parse(data).choices?.[0]?.delta?.content
+        if (chunk) {
+          fullContent += chunk
+          textBuffer  += chunk
+          const parts = textBuffer.split('\n')
+          textBuffer  = parts.pop()          // keep incomplete text line
+          for (const line of parts) processLine(line)
+        }
+      } catch { /* ignore malformed SSE JSON */ }
+    }
+  }
+
+  // Flush any remaining text
+  if (textBuffer) processLine(textBuffer)
+  commitFile()
+
+  log.build(name, `OpenRouter response length: ${fullContent.length}`)
+
+  // ── Fallbacks (in case streaming parser missed files) ────────────────────
   if (filesWritten === 0) {
-    const cleanContent = content.replace(/```[\w]*\n?|```/g, '').trim()
+    log.build(name, 'Stream parser found no files — trying full-content regex')
+    const filePattern = /---\s*FILE:\s*([^\s-][^\n]*?)\s*---\n([\s\S]*?)\n---\s*END FILE\s*---/g
+    let m
+    while ((m = filePattern.exec(fullContent)) !== null) writeFile(m[1].trim(), m[2])
+  }
+
+  if (filesWritten === 0) {
+    const fallbackFiles = parseMultiFileContent(fullContent)
+    for (const [fn, fc] of Object.entries(fallbackFiles)) writeFile(fn, fc)
+  }
+
+  if (filesWritten === 0) {
+    const cleanContent = fullContent.replace(/```[\w]*\n?|```/g, '').trim()
     mkdirSync(join(dir, 'src'), { recursive: true })
     writeFileSync(join(dir, 'src', 'index.js'), cleanContent)
     if (!existsSync(join(dir, 'package.json'))) {
       writeFileSync(join(dir, 'package.json'), JSON.stringify({
-        name: name,
-        type: 'module',
-        scripts: { start: 'node src/index.js' },
-        dependencies: { express: '^4.18.0' }
+        name, type: 'module', scripts: { start: 'node src/index.js' },
+        dependencies: { express: '^4.18.0' },
       }, null, 2))
     }
     filesWritten = 1
@@ -426,7 +482,7 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
         try {
           const stat = statSync(fullPath)
           if (stat.isFile()) {
-            const sizeStr = stat.size > 1024 ? `${(stat.size/1024).toFixed(1)}KB` : `${stat.size}B`
+            const sizeStr = stat.size > 1024 ? `${(stat.size / 1024).toFixed(1)}KB` : `${stat.size}B`
             fileList.push(`${file} (${sizeStr})`)
           }
         } catch {}
@@ -656,10 +712,33 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
     }
   }
 
+  // Write compose file NOW — it only depends on userId+name, not on generated code.
+  // This lets the early Docker build start as soon as package.json+Dockerfile arrive.
+  writeComposeFile(dir, userId, name)
+
+  // Early Docker build: fires when streaming delivers package.json + Dockerfile.
+  // Runs npm install in the background while DeepSeek finishes generating source files.
+  // The BuildKit npm cache is warm by the time docker compose up runs.
+  let earlyBuildProc = null
+  const onFilesReady = () => {
+    log.build(logName, '⚡ package.json + Dockerfile ready — starting early Docker build')
+    earlyBuildProc = spawn('docker', ['build', '--no-cache=false', '-t', `vpsbot-early-${name}`, '.'], {
+      cwd: dir,
+      env: { ...process.env, DOCKER_BUILDKIT: '1' },
+      stdio: 'ignore',
+    })
+    earlyBuildProc.on('close', (code) => {
+      log.build(logName, `Early Docker build exited (code=${code}) — npm cache warm`)
+      // Clean up the temp image (fire-and-forget)
+      spawn('docker', ['rmi', '-f', `vpsbot-early-${name}`], { stdio: 'ignore' })
+    })
+  }
+
   try {
-    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
+    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo, onFilesReady)
     log.info(`[${logName}] code generated`)
   } catch (err) {
+    try { earlyBuildProc?.kill() } catch {}
     log.error(`[${logName}] code generation failed`, err.message)
     throw new Error(`Code generation failed: ${err.message}`)
   }
@@ -678,7 +757,6 @@ CMD ["npm", "start"]`
     log.build(logName, 'Generated fallback Dockerfile')
   }
 
-  writeComposeFile(dir, userId, name)
   log.build(logName, 'Docker compose up starting')
   await onStatus('🐳 Building image...')
 
