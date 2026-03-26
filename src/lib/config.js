@@ -13,11 +13,10 @@ export const config = {
   get port() { return parseInt(process.env.PORT ?? '80') },
 
   // Generate project URL based on network config
-  // Multi-user: uses user slug for pretty URLs (e.g. john-myapp.domain.com)
+  // URL uses only the project name (e.g. my-app.domain.com)
   projectUrl: (slug, name) => {
-    const subdomain = `${slug}-${name}`
     if (process.env.DOMAIN) {
-      return `https://${subdomain}.${process.env.DOMAIN}`
+      return `https://${name}.${process.env.DOMAIN}`
     } else if (process.env.IP_ADDRESS) {
       const portStr = process.env.PORT && process.env.PORT !== '80' ? `:${process.env.PORT}` : ''
       return `http://${process.env.IP_ADDRESS}${portStr}`

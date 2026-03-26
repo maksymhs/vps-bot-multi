@@ -201,6 +201,16 @@ export const userStore = {
   get maintenanceMode() { return _maintenanceMode },
   setMaintenance(on) { _maintenanceMode = !!on },
 
+  // Check if a project name is already taken by ANY user (for unique URLs)
+  isNameTakenGlobally(name) {
+    const users = readUsers()
+    for (const userId of Object.keys(users)) {
+      const projects = readUserProjects(userId)
+      if (projects[name]) return true
+    }
+    return false
+  },
+
   // ── Global queries (for sleep manager, admin, etc.) ──
   getAllProjectsGlobal() {
     const users = readUsers()

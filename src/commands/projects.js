@@ -101,8 +101,7 @@ function getNextPort(userId) {
 
 export function writeComposeFile(dir, userId, name) {
   const containerName = userStore.containerName(userId, name)
-  const slug = userStore.getUserSlug(userId)
-  const subdomain = `${slug}-${name}`
+  const subdomain = name   // URL uses just the project name
   let compose
   if (config.domain) {
     compose = `services:
@@ -276,7 +275,7 @@ export async function generateProjectName(description, userId) {
     const base = words.join('-') || 'my-app'
     let candidate = base
     let i = 2
-    while (userStore.getProject(userId, candidate)) { candidate = `${base}-${i}`; i++ }
+    while (userStore.isNameTakenGlobally(candidate)) { candidate = `${base}-${i}`; i++ }
     return candidate
   }
 
@@ -310,14 +309,14 @@ export async function generateProjectName(description, userId) {
     name = words.join('-') || 'my-app'
   }
 
-  // Check availability — increment suffix if taken
+  // Check availability globally (URL is name-only, so must be unique across all users)
   let candidate = name
   let i = 2
-  while (userStore.getProject(userId, candidate)) { candidate = `${name}-${i}`; i++ }
+  while (userStore.isNameTakenGlobally(candidate)) { candidate = `${name}-${i}`; i++ }
   return candidate
 }
 
-async function generateCode(dir, name, description, onProgress = null, errorContext = null, _model = null, mode = 'new', templateInfo = null, onFilesReady = null) {
+async function generateCode(dir, name, description, onProgress = null, errorContext = null, _model = null, mode = 'new', templateInfo = null) {
   const existingFiles = (mode === 'patch') ? getExistingFiles(dir) : []
   const prompt = (mode === 'patch')
     ? buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
@@ -373,26 +372,18 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
   // caller can start a background Docker build (npm install) in parallel with
   // the remaining code still being generated.
 
-  const writtenFiles = new Set()
   let fullContent = ''       // accumulated for fallback parsing
   let filesWritten = 0
   let currentFile = null
   let contentLines = []
-  let earlyBuildFired = false
 
   const writeFile = (filename, fileContent) => {
     if (!filename || filename.includes('..')) return
     const filePath = join(dir, filename)
     mkdirSync(dirname(filePath), { recursive: true })
     writeFileSync(filePath, fileContent)
-    writtenFiles.add(filename)
     filesWritten++
     log.build(name, `  wrote (stream): ${filename} (${fileContent.length}B)`)
-
-    if (!earlyBuildFired && writtenFiles.has('package.json') && writtenFiles.has('Dockerfile')) {
-      earlyBuildFired = true
-      onFilesReady?.()
-    }
   }
 
   const commitFile = () => {
@@ -686,8 +677,10 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   const logName = `${slug}-${name}`
   log.info(`[${logName}] build start`, `dir=${dir} mode=${mode}`)
 
-  // Template flow: sync repo, match template+components, copy files (only for new/full builds)
+  // ── Template resolution ────────────────────────────────────────────────────
   let templateInfo = null
+  let templateStarted = false
+
   if (mode === 'new' || mode === 'full') {
     await onStatus('📦 Syncing templates...')
     const synced = syncTemplates()
@@ -700,12 +693,26 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
         log.info(`[${logName}] matched ${label} (score=${match.score})`)
         await onStatus(`📋 Using ${label}`)
 
-        // Copy template boilerplate + component files in one call
         templateInfo = resolveAndCopy(match, dir)
         if (templateInfo) {
           try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
           userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
           log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
+
+          // ── Phase 1: start the virgin template container immediately ────────
+          // This warms the npm/Docker cache AND gives the user something to see
+          // while Phase 2 (AI code generation) runs in the background.
+          writeComposeFile(dir, userId, name)
+          log.build(logName, 'Phase 1: starting virgin template container')
+          try {
+            await dockerComposeUp(dir, null)
+            templateStarted = true
+            const url = projectUrl(userId, name)
+            log.build(logName, `Phase 1: template running → ${url}`)
+            await onStatus(`🌐 Open now: ${url}\n🧠 Customizing your app...`)
+          } catch (err) {
+            log.build(logName, `Phase 1: template start failed (will build after gen): ${err.message}`)
+          }
         }
       } else {
         log.info(`[${logName}] no template matched, using generic build`)
@@ -715,74 +722,42 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
     }
   }
 
-  // Write compose file NOW — it only depends on userId+name, not on generated code.
-  // This lets the early Docker build start as soon as package.json+Dockerfile arrive.
-  writeComposeFile(dir, userId, name)
-
-  // Early Docker build: fires when streaming delivers package.json + Dockerfile.
-  // Uses a minimal Dockerfile that stops after npm install (no COPY . .) so it:
-  //   a) completes reliably without needing the full source tree
-  //   b) warms the BuildKit npm cache before docker compose up runs
-  // We await its completion before compose up so the cache is guaranteed hot.
-  let earlyBuildDone = Promise.resolve()
-  const onFilesReady = () => {
-    log.build(logName, '⚡ package.json + Dockerfile ready — starting early npm install')
-    // Minimal Dockerfile: only the npm install layer, no source files needed
-    const earlyDockerfile = `# syntax=docker/dockerfile:1
-FROM node:20-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN --mount=type=cache,target=/root/.npm npm install --omit=dev
-`
-    writeFileSync(join(dir, 'Dockerfile.early'), earlyDockerfile)
-
-    earlyBuildDone = new Promise((resolve) => {
-      const proc = spawn('docker', ['build', '-f', 'Dockerfile.early', '--no-cache=false', '-t', `vpsbot-early-${name}`, '.'], {
-        cwd: dir,
-        env: { ...process.env, DOCKER_BUILDKIT: '1' },
-        stdio: 'ignore',
-      })
-      proc.on('close', (code) => {
-        log.build(logName, `Early npm install exited (code=${code}) — cache warm`)
-        try { rmSync(join(dir, 'Dockerfile.early')) } catch {}
-        spawn('docker', ['rmi', '-f', `vpsbot-early-${name}`], { stdio: 'ignore' })
-        resolve()
-      })
-      proc.on('error', resolve)  // don't block on error
-    })
+  // Write compose file if Phase 1 didn't do it (patch/full modes or no template match)
+  if (!templateStarted) {
+    writeComposeFile(dir, userId, name)
   }
 
+  // ── Phase 2: AI code generation ───────────────────────────────────────────
+  // Runs while the template container is already serving (if Phase 1 succeeded).
+  // For patch/rebuild modes this is the only generation step.
   try {
-    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo, onFilesReady)
+    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
     log.info(`[${logName}] code generated`)
   } catch (err) {
     log.error(`[${logName}] code generation failed`, err.message)
     throw new Error(`Code generation failed: ${err.message}`)
   }
 
-  // Wait for early build to finish (npm cache hot) — max 90s
-  await Promise.race([earlyBuildDone, new Promise(r => setTimeout(r, 90_000))])
-
-  // Ensure Dockerfile exists (fallback)
+  // ── Phase 3: rebuild with AI-generated code ───────────────────────────────
+  // npm install layer is already cached (Phase 1 built the same base image).
+  // For Node.js templates this is near-instant (just COPY new files + start).
+  // For Vite templates the vite build runs with the new source code (~30-60s).
   if (!existsSync(join(dir, 'Dockerfile'))) {
-    const dockerfile = `# syntax=docker/dockerfile:1
+    writeFileSync(join(dir, 'Dockerfile'), `# syntax=docker/dockerfile:1
 FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm install --omit=dev
 COPY . .
 EXPOSE 3000
-CMD ["npm", "start"]`
-    writeFileSync(join(dir, 'Dockerfile'), dockerfile)
+CMD ["npm", "start"]`)
     log.build(logName, 'Generated fallback Dockerfile')
   }
 
-  log.build(logName, 'Docker compose up starting')
-  await onStatus('🐳 Building image...')
+  log.build(logName, 'Phase 3: rebuilding with generated code')
+  await onStatus('🐳 Applying...')
 
-  const onDockerProgress = async (step) => {
-    log.build(logName, `Docker: ${step}`)
-  }
+  const onDockerProgress = async (step) => { log.build(logName, `Docker: ${step}`) }
 
   try {
     await dockerComposeUp(dir, onDockerProgress)
@@ -794,9 +769,9 @@ CMD ["npm", "start"]`
     throw err
   }
 
+  // ── Health check ──────────────────────────────────────────────────────────
   await onStatus('🔍 Verifying...')
 
-  // In IP mode, check via localhost:mappedPort; in domain mode, use container IP:3000
   const containerFullName = userStore.containerName(userId, name)
   const project = userStore.getProject(userId, name)
   let healthHost, healthPort
@@ -806,7 +781,6 @@ CMD ["npm", "start"]`
     healthHost = '127.0.0.1'
     healthPort = project.port
   } else {
-    // Retry IP lookup — container may not have joined the network yet
     let ip = null
     for (let attempt = 0; attempt < 10; attempt++) {
       ip = await getContainerIpByFullName(containerFullName)
@@ -825,9 +799,7 @@ CMD ["npm", "start"]`
 
   log.info(`[${logName}] polling health at ${healthHost}:${healthPort}`)
 
-  const onHealthProgress = async (msg) => {
-    log.build(logName, `Health: ${msg}`)
-  }
+  const onHealthProgress = async (msg) => { log.build(logName, `Health: ${msg}`) }
 
   const healthy = await pollHealth(healthHost, healthPort, 60_000, onHealthProgress)
   if (!healthy) {
