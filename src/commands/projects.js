@@ -913,6 +913,7 @@ function createProgressAnimator(ctx, name, buildStart) {
   let msgId = null
   let currentText = ''
   let currentRetry = ''
+  let stickyUrl = null   // set once Phase 1 gives us a URL — never cleared
   let frame = 0
   let barIdx = 0
   let timer = null
@@ -923,7 +924,8 @@ function createProgressAnimator(ctx, name, buildStart) {
     const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`
     const spinner = frames[frame % frames.length]
     const bar = barFrames[barIdx % barFrames.length]
-    return `${spinner} *${name}*${currentRetry}\n${currentText}\n\`${bar}\` _${timeStr}_`
+    const urlLine = stickyUrl ? `🌐 ${stickyUrl}\n` : ''
+    return `${spinner} *${name}*${currentRetry}\n${urlLine}${currentText}\n\`${bar}\` _${timeStr}_`
   }
 
   const tick = async () => {
@@ -938,7 +940,15 @@ function createProgressAnimator(ctx, name, buildStart) {
 
   return {
     async update(text) {
-      currentText = text
+      // If text contains a URL line (Phase 1 open-now message), extract and pin it
+      const urlMatch = text.match(/🌐 Open now: (https?:\/\/\S+)/)
+      if (urlMatch) {
+        stickyUrl = urlMatch[1]
+        // Keep only the status part (after the URL line)
+        currentText = text.replace(/🌐 Open now: \S+\n?/, '').trim()
+      } else {
+        currentText = text
+      }
       // Reset bar on phase change
       barIdx = 0
       frame = 0
