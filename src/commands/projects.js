@@ -263,9 +263,10 @@ function buildTemplatePrompt(name, description, templateInfo, errorContext = nul
     `YOUR TASK:\n` +
     `1. The files listed above are already copied into the project directory\n` +
     `2. Customize and extend them to match the user's description\n` +
-    `3. Modify existing files as needed — you can overwrite any boilerplate file\n` +
+    `3. Modify existing files as needed — you can overwrite boilerplate files\n` +
     `4. Add new files if the description requires functionality beyond the template\n` +
     `5. Integrate all components listed above into the application\n` +
+    `   IMPORTANT: Do NOT rewrite files marked with [component-name] prefix — those are pre-built toolkit files, use them as-is\n` +
     `6. Update package.json name to "${name}"\n` +
     `7. Ensure GET /health returns { status: "ok" } — MANDATORY\n` +
     `8. Use ONLY ASCII characters in code\n` +
@@ -300,7 +301,8 @@ function buildRebuildPrompt(name, description, mode, existingFiles, errorContext
     `4. Keep the existing file structure\n` +
     `5. If you need new dependencies, update package.json\n` +
     `6. Use ONLY ASCII characters in JS code\n` +
-    `7. Write modified files to disk. Code only, no explanations.`
+    `7. Dockerfiles: always use "COPY package*.json ./" and node:20-alpine\n` +
+    `8. Write modified files to disk. Code only, no explanations.`
 
   if (!errorContext) return prompt
   return prompt + `\n\n⚠️ FIX: The previous attempt failed:\n${errorContext}`
@@ -394,6 +396,8 @@ file contents here
 --- END FILE ---
 
 CRITICAL OUTPUT ORDER: Always output Dockerfile first, then package.json second, then all remaining files. This order is mandatory.
+DOCKERFILE RULES: Always use "COPY package*.json ./" (never "COPY package.json package-lock.json ./"). Always use node:20-alpine. Always use --mount=type=cache,target=/root/.npm for npm install.
+TOOLKIT FILES: Files listed with a [component-name] prefix are pre-built toolkit files. Do NOT rewrite or output them — only output application files that need to change.
 Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
   if (!config.openrouterKey) throw new Error('No AI provider available (set OPENROUTER_API_KEY in .env)')
