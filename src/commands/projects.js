@@ -717,20 +717,35 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   writeComposeFile(dir, userId, name)
 
   // Early Docker build: fires when streaming delivers package.json + Dockerfile.
-  // Runs npm install in the background while DeepSeek finishes generating source files.
-  // The BuildKit npm cache is warm by the time docker compose up runs.
-  let earlyBuildProc = null
+  // Uses a minimal Dockerfile that stops after npm install (no COPY . .) so it:
+  //   a) completes reliably without needing the full source tree
+  //   b) warms the BuildKit npm cache before docker compose up runs
+  // We await its completion before compose up so the cache is guaranteed hot.
+  let earlyBuildDone = Promise.resolve()
   const onFilesReady = () => {
-    log.build(logName, '⚡ package.json + Dockerfile ready — starting early Docker build')
-    earlyBuildProc = spawn('docker', ['build', '--no-cache=false', '-t', `vpsbot-early-${name}`, '.'], {
-      cwd: dir,
-      env: { ...process.env, DOCKER_BUILDKIT: '1' },
-      stdio: 'ignore',
-    })
-    earlyBuildProc.on('close', (code) => {
-      log.build(logName, `Early Docker build exited (code=${code}) — npm cache warm`)
-      // Clean up the temp image (fire-and-forget)
-      spawn('docker', ['rmi', '-f', `vpsbot-early-${name}`], { stdio: 'ignore' })
+    log.build(logName, '⚡ package.json + Dockerfile ready — starting early npm install')
+    // Minimal Dockerfile: only the npm install layer, no source files needed
+    const earlyDockerfile = `# syntax=docker/dockerfile:1
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN --mount=type=cache,target=/root/.npm npm install --omit=dev
+`
+    writeFileSync(join(dir, 'Dockerfile.early'), earlyDockerfile)
+
+    earlyBuildDone = new Promise((resolve) => {
+      const proc = spawn('docker', ['build', '-f', 'Dockerfile.early', '--no-cache=false', '-t', `vpsbot-early-${name}`, '.'], {
+        cwd: dir,
+        env: { ...process.env, DOCKER_BUILDKIT: '1' },
+        stdio: 'ignore',
+      })
+      proc.on('close', (code) => {
+        log.build(logName, `Early npm install exited (code=${code}) — cache warm`)
+        try { rmSync(join(dir, 'Dockerfile.early')) } catch {}
+        spawn('docker', ['rmi', '-f', `vpsbot-early-${name}`], { stdio: 'ignore' })
+        resolve()
+      })
+      proc.on('error', resolve)  // don't block on error
     })
   }
 
@@ -738,10 +753,12 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
     await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo, onFilesReady)
     log.info(`[${logName}] code generated`)
   } catch (err) {
-    try { earlyBuildProc?.kill() } catch {}
     log.error(`[${logName}] code generation failed`, err.message)
     throw new Error(`Code generation failed: ${err.message}`)
   }
+
+  // Wait for early build to finish (npm cache hot) — max 90s
+  await Promise.race([earlyBuildDone, new Promise(r => setTimeout(r, 90_000))])
 
   // Ensure Dockerfile exists (fallback)
   if (!existsSync(join(dir, 'Dockerfile'))) {

@@ -297,7 +297,18 @@ cat > "${WARMUP_DIR}/package.json" << 'PKGJSON'
     "dotenv": "^16",
     "helmet": "^7",
     "uuid": "^9",
-    "node-fetch": "^3"
+    "node-fetch": "^3",
+    "axios": "^1",
+    "ws": "^8",
+    "socket.io": "^4",
+    "jsonwebtoken": "^9",
+    "bcrypt": "^5",
+    "multer": "^1",
+    "mongoose": "^8",
+    "pg": "^8",
+    "ejs": "^3",
+    "marked": "^12",
+    "three": "^0.164"
   }
 }
 PKGJSON
