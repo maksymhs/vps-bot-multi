@@ -1,5 +1,5 @@
 import { execFile, execSync, spawn } from 'child_process'
-import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, statSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, statSync } from 'fs'
 import { join, dirname } from 'path'
 import { getDocker } from '../lib/docker-client.js'
 import { buildingSet } from '../lib/build-state.js'
@@ -10,6 +10,65 @@ import { syncTemplates, matchTemplate, resolveAndCopy } from '../lib/templates.j
 import { enqueueBuild, getQueuePosition } from '../lib/build-queue.js'
 
 const MAX_RETRIES = 2
+
+// ── Loading server ────────────────────────────────────────────────────────────
+// Injected in Phase 1 so the user has a live URL from the first seconds.
+// The AI overwrites Dockerfile in Phase 2; loading artifacts are cleaned up
+// before Phase 3 rebuilds with the real app.
+
+const LOADING_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Building your app...</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#09090b;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+.wrap{text-align:center;padding:2rem}
+.ring{width:52px;height:52px;border-radius:50%;border:3px solid #27272a;border-top-color:#6366f1;animation:spin .8s linear infinite;margin:0 auto 1.75rem}
+@keyframes spin{to{transform:rotate(360deg)}}
+h1{font-size:1.4rem;font-weight:600;color:#fafafa;margin-bottom:.5rem}
+p{color:#71717a;font-size:.875rem;line-height:1.6;max-width:280px;margin:0 auto}
+.dots span{animation:blink 1.4s infinite both}
+.dots span:nth-child(2){animation-delay:.2s}
+.dots span:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="ring"></div>
+  <h1>Building your app<span class="dots"><span>.</span><span>.</span><span>.</span></span></h1>
+  <p>AI is generating your code.<br>This page will update automatically.</p>
+</div>
+<script>
+setInterval(async()=>{
+  try{const r=await fetch('/health');const d=await r.json();if(!d.loading)location.reload()}catch(e){}
+},2000)
+setTimeout(()=>location.reload(),30000)
+</script>
+</body>
+</html>`
+
+const LOADING_SERVER_JS = `const http = require('http')
+const html = ${JSON.stringify(LOADING_HTML)}
+http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, {'Content-Type': 'application/json'})
+    return res.end('{"status":"ok","loading":true}')
+  }
+  res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'})
+  res.end(html)
+}).listen(3000)
+`
+
+const LOADING_DOCKERFILE = `FROM node:20-alpine
+WORKDIR /app
+COPY loading-server.js .
+EXPOSE 3000
+CMD ["node", "loading-server.js"]
+`
 
 function getUserId(ctx) {
   return ctx.from?.id
@@ -699,19 +758,37 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
           userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
           log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
 
-          // ── Phase 1: start the virgin template container immediately ────────
-          // This warms the npm/Docker cache AND gives the user something to see
-          // while Phase 2 (AI code generation) runs in the background.
+          // ── Phase 1: start loading server immediately ───────────────────────
+          // A minimal Node.js server starts in ~3s (no npm install, no vite build)
+          // so the user gets a live URL right away while the real app is generated.
+          // The AI overwrites Dockerfile in Phase 2; we restore or clean it before Phase 3.
           writeComposeFile(dir, userId, name)
-          log.build(logName, 'Phase 1: starting virgin template container')
+
+          // Backup template's Dockerfile so we can restore if AI skips it
+          if (existsSync(join(dir, 'Dockerfile'))) {
+            writeFileSync(join(dir, 'Dockerfile.template'), readFileSync(join(dir, 'Dockerfile')))
+          }
+          writeFileSync(join(dir, 'loading-server.js'), LOADING_SERVER_JS)
+          writeFileSync(join(dir, 'Dockerfile'), LOADING_DOCKERFILE)
+
+          log.build(logName, 'Phase 1: starting loading server')
           try {
             await dockerComposeUp(dir, null)
             templateStarted = true
             const url = projectUrl(userId, name)
-            log.build(logName, `Phase 1: template running → ${url}`)
-            await onStatus(`🌐 Open now: ${url}\n🧠 Customizing your app...`)
+            log.build(logName, `Phase 1: loading server live → ${url}`)
+            await onStatus(`🌐 Open now: ${url}\n🧠 Generating your app...`)
           } catch (err) {
-            log.build(logName, `Phase 1: template start failed (will build after gen): ${err.message}`)
+            log.build(logName, `Phase 1: loading server failed (will build after gen): ${err.message}`)
+            // Clean up loading artifacts so Phase 3 starts clean
+            for (const f of ['loading-server.js', 'Dockerfile.template']) {
+              try { rmSync(join(dir, f)) } catch {}
+            }
+            // Restore original Dockerfile
+            if (existsSync(join(dir, 'Dockerfile.template'))) {
+              writeFileSync(join(dir, 'Dockerfile'), readFileSync(join(dir, 'Dockerfile.template')))
+              rmSync(join(dir, 'Dockerfile.template'))
+            }
           }
         }
       } else {
@@ -738,8 +815,22 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
     throw new Error(`Code generation failed: ${err.message}`)
   }
 
+  // ── Clean up loading artifacts before Phase 3 ────────────────────────────
+  if (templateStarted) {
+    // If AI didn't generate a Dockerfile (overwrote loading one), restore template's
+    const currentDockerfile = existsSync(join(dir, 'Dockerfile'))
+      ? readFileSync(join(dir, 'Dockerfile'), 'utf8').trim()
+      : ''
+    if (currentDockerfile === LOADING_DOCKERFILE.trim() && existsSync(join(dir, 'Dockerfile.template'))) {
+      writeFileSync(join(dir, 'Dockerfile'), readFileSync(join(dir, 'Dockerfile.template')))
+      log.build(logName, 'Restored template Dockerfile (AI did not generate one)')
+    }
+    for (const f of ['Dockerfile.template', 'loading-server.js']) {
+      try { rmSync(join(dir, f)) } catch {}
+    }
+  }
+
   // ── Phase 3: rebuild with AI-generated code ───────────────────────────────
-  // npm install layer is already cached (Phase 1 built the same base image).
   // For Node.js templates this is near-instant (just COPY new files + start).
   // For Vite templates the vite build runs with the new source code (~30-60s).
   if (!existsSync(join(dir, 'Dockerfile'))) {
