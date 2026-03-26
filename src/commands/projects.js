@@ -397,6 +397,20 @@ file contents here
 
 CRITICAL OUTPUT ORDER: Always output Dockerfile first, then package.json second, then all remaining files. This order is mandatory.
 DOCKERFILE RULES: Always use "COPY package*.json ./" (never "COPY package.json package-lock.json ./"). Always use node:20-alpine. Always use --mount=type=cache,target=/root/.npm for npm install.
+For multi-stage Vite builds Stage 2 MUST include node_modules — use exactly this pattern:
+  FROM node:20-alpine AS build
+  WORKDIR /app
+  COPY package*.json ./
+  RUN --mount=type=cache,target=/root/.npm npm install
+  COPY . .
+  RUN npm run build
+  FROM node:20-alpine
+  WORKDIR /app
+  COPY --from=build /app/dist ./dist
+  COPY --from=build /app/node_modules ./node_modules
+  COPY --from=build /app/package.json ./
+  EXPOSE 3000
+  CMD ["node", "src/server.js"]
 TOOLKIT FILES: Files listed with a [component-name] prefix are pre-built toolkit files. Do NOT rewrite or output them — only output application files that need to change.
 Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
