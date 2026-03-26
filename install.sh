@@ -378,12 +378,13 @@ systemctl enable vps-bot-multi > /dev/null 2>&1
 
 chown -R "${VPSBOT_USER}:${VPSBOT_USER}" "$PROJECTS_DIR" 2>/dev/null || true
 
-# Start bot if BOT_TOKEN is set
+# Always restart the service so updated code takes effect immediately.
+# If BOT_TOKEN is missing the process will exit on its own with a clear error in logs.
+run_silent "Restarting bot" bash -c "systemctl restart vps-bot-multi"
 if [ -n "$BOT_TOKEN" ] && [ "$BOT_TOKEN" != "your_telegram_bot_token" ]; then
-    run_silent "Starting bot" bash -c "systemctl restart vps-bot-multi"
-    echo -e "  ${GREEN}✔${NC} Bot running as systemd service"
+    echo -e "  ${GREEN}✔${NC} Bot restarted"
 else
-    echo -e "  ${YELLOW}!${NC} BOT_TOKEN not set — edit .env and run: ${CYAN}systemctl start vps-bot-multi${NC}"
+    echo -e "  ${YELLOW}!${NC} BOT_TOKEN not set — edit .env and run: ${CYAN}systemctl restart vps-bot-multi${NC}"
 fi
 
 echo ""
