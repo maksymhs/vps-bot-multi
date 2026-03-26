@@ -373,6 +373,54 @@ function fixComponentImports(dir) {
   }
 }
 
+// Fix package.json scripts.start pointing to a non-existent file.
+// The AI often writes "node src/server.js" but may create the file as
+// "server.js" (root) or "src/index.js". Also generates a minimal fallback
+// server for Vite apps if no server file is found at all.
+function fixPackageStart(dir) {
+  const pkgPath = join(dir, 'package.json')
+  if (!existsSync(pkgPath)) return
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+    const startCmd = pkg.scripts?.start
+    if (!startCmd) return
+
+    const nodeMatch = startCmd.match(/node\s+(\S+\.(?:js|mjs|cjs))/)
+    if (!nodeMatch) return
+    const declared = nodeMatch[1]
+
+    if (existsSync(join(dir, declared))) return  // all good
+
+    // Find an existing server/index file
+    const candidates = ['server.js', 'src/index.js', 'index.js', 'src/app.js', 'app.js', 'src/server.js']
+    const found = candidates.find(c => c !== declared && existsSync(join(dir, c)))
+    if (found) {
+      pkg.scripts.start = `node ${found}`
+      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2))
+      log.build(dir.split('/').pop(), `Fixed package.json start: "${startCmd}" → "node ${found}"`)
+      return
+    }
+
+    // No server file at all — generate a minimal Express server for Vite dist
+    const serverContent = `import express from 'express'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const app = express()
+app.use(express.static(join(__dirname, 'dist')))
+app.get('/health', (_, res) => res.json({ status: 'ok' }))
+app.get('*', (_, res) => res.sendFile(join(__dirname, 'dist', 'index.html')))
+app.listen(process.env.PORT || 3000)
+`
+    writeFileSync(join(dir, 'server.js'), serverContent)
+    pkg.scripts.start = 'node server.js'
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2))
+    log.build(dir.split('/').pop(), `Generated fallback server.js (start was "${startCmd}", file missing)`)
+  } catch (err) {
+    log.error('[fixPackageStart]', err.message)
+  }
+}
+
 function getExistingFiles(dir) {
   try {
     const entries = execSync(`find ${JSON.stringify(dir)} -type f -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null || true`, {
@@ -619,6 +667,7 @@ Do NOT include explanations, comments outside code, or markdown fences. Output A
 
   fixUnicodeChars(dir)
   fixComponentImports(dir)
+  fixPackageStart(dir)
 }
 
 function parseMultiFileContent(content) {
