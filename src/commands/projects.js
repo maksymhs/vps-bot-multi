@@ -465,7 +465,7 @@ For multi-stage Vite builds Stage 2 MUST include node_modules — use exactly th
   COPY --from=build /app/node_modules ./node_modules
   COPY --from=build /app/package.json ./
   EXPOSE 3000
-  CMD ["node", "src/server.js"]
+  CMD ["npm", "start"]
 TOOLKIT FILES: Files listed with a [component-name] prefix are pre-built toolkit files. Do NOT rewrite or output them — only output application files that need to change.
 Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
