@@ -209,6 +209,7 @@ if [ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "your_telegram_bot_token" ]; then
         echo -e "  ${YELLOW}!${NC} Skipped — set BOT_TOKEN in .env later"
     fi
 else
+    sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=${BOT_TOKEN}|" "${INSTALL_DIR}/.env"
     echo -e "  ${GREEN}✔${NC} BOT_TOKEN"
 fi
 
@@ -224,6 +225,7 @@ if [ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-
         echo -e "  ${YELLOW}!${NC} Skipped — set OPENROUTER_API_KEY in .env later"
     fi
 else
+    sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${OPENROUTER_API_KEY}|" "${INSTALL_DIR}/.env"
     echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY"
 fi
 
@@ -247,6 +249,7 @@ if [ -z "$DOMAIN" ] || [ "$DOMAIN" = "your-domain.com" ]; then
         fi
     fi
 else
+    sed -i "s|^DOMAIN=.*|DOMAIN=${DOMAIN}|" "${INSTALL_DIR}/.env"
     echo -e "  ${GREEN}✔${NC} DOMAIN → ${DOMAIN}"
 fi
 
@@ -263,6 +266,7 @@ if [ -z "$ADMIN_USER_ID" ] || [ "$ADMIN_USER_ID" = "123456789" ]; then
         echo -e "  ${GREEN}✔${NC} Admin will be auto-assigned to first /start user"
     fi
 else
+    sed -i "s|^ADMIN_USER_ID=.*|ADMIN_USER_ID=${ADMIN_USER_ID}|" "${INSTALL_DIR}/.env"
     echo -e "  ${GREEN}✔${NC} ADMIN_USER_ID → ${ADMIN_USER_ID}"
 fi
 
