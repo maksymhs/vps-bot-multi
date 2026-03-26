@@ -202,9 +202,9 @@ export async function startNewFlow(ctx) {
     )
   }
 
-  pendingNew.set(ctx.chat.id, { step: 'name' })
+  pendingNew.set(ctx.chat.id, { step: 'desc' })
   return ctx.editMessageText(
-    '➕ *New project*\n\nProject name? (letters, numbers, and hyphens only)',
+    '➕ *New project*\n\nDescribe what your app should do:\n\n_The name will be generated automatically._',
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'list')]]),

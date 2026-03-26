@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import { Telegraf } from 'telegraf'
 import { execFile } from 'child_process'
-import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl } from './commands/projects.js'
+import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl, generateProjectName } from './commands/projects.js'
 import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild } from './commands/menu.js'
 import { userStore } from './lib/user-store.js'
 import { getDocker } from './lib/docker-client.js'
@@ -130,24 +130,23 @@ bot.on('text', async (ctx, next) => {
   const state = pendingNew.get(ctx.chat.id)
   if (!state) return next()
 
-  if (state.step === 'name') {
-    const name = ctx.message.text.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-')
-    if (!name) return ctx.reply('Invalid name. Only letters, numbers, and hyphens.')
-    if (userStore.getProject(userId, name)) {
-      return ctx.reply(`"${name}" already exists. Pick another name or /menu to cancel.`)
-    }
-    if (!userStore.canCreateProject(userId)) {
-      pendingNew.delete(ctx.chat.id)
-      return ctx.reply(`⚠️ Limit reached (${config.maxAppsPerUser} apps). Delete one first.`)
-    }
-    pendingNew.set(ctx.chat.id, { step: 'desc', name })
-    return ctx.reply(`✅ Name: *${name}*\n\nDescribe what the app should do:`, { parse_mode: 'Markdown' })
-  }
-
   if (state.step === 'desc') {
-    const { name } = state
     const description = ctx.message.text.trim()
     pendingNew.delete(ctx.chat.id)
+
+    if (!userStore.canCreateProject(userId)) {
+      return ctx.reply(`⚠️ Limit reached (${config.maxAppsPerUser} apps). Delete one first.`)
+    }
+
+    // Generate project name automatically from description
+    let name
+    const genMsg = await ctx.reply('🔤 Generating project name...', { parse_mode: 'Markdown' })
+    try {
+      name = await generateProjectName(description, userId)
+    } catch {
+      name = 'app-' + Date.now().toString(36).slice(-4)
+    }
+    await ctx.telegram.editMessageText(ctx.chat.id, genMsg.message_id, null, `🔤 Project name: *${name}*`, { parse_mode: 'Markdown' }).catch(() => {})
 
     const slug = userStore.getUserSlug(userId)
     const buildKey = `${slug}-${name}`

@@ -267,6 +267,54 @@ function getExistingFiles(dir) {
   }
 }
 
+export async function generateProjectName(description, userId) {
+  if (!config.openrouterKey) {
+    // Fallback: derive from first words of description
+    const words = description.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().split(/\s+/).slice(0, 3)
+    const base = words.join('-') || 'my-app'
+    let candidate = base
+    let i = 2
+    while (userStore.getProject(userId, candidate)) { candidate = `${base}-${i}`; i++ }
+    return candidate
+  }
+
+  let name = ''
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.openrouterKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://vps-bot-multi.local',
+        'X-Title': 'VPS-Bot-Multi',
+      },
+      body: JSON.stringify({
+        model: 'deepseek/deepseek-chat-v3-0324',
+        messages: [{
+          role: 'user',
+          content: `Generate a short project slug (2-3 words, kebab-case, lowercase, only a-z 0-9 hyphens, max 20 chars) for this app: "${description.slice(0, 200)}". Reply with ONLY the slug. Examples: task-tracker, weather-bot, link-saver`,
+        }],
+        max_tokens: 15,
+      }),
+    })
+    const data = await res.json()
+    name = (data.choices?.[0]?.message?.content || '').trim()
+  } catch { /* ignore, fallback below */ }
+
+  // Sanitize
+  name = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 20)
+  if (!name) {
+    const words = description.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().split(/\s+/).slice(0, 3)
+    name = words.join('-') || 'my-app'
+  }
+
+  // Check availability — increment suffix if taken
+  let candidate = name
+  let i = 2
+  while (userStore.getProject(userId, candidate)) { candidate = `${name}-${i}`; i++ }
+  return candidate
+}
+
 async function generateCode(dir, name, description, onProgress = null, errorContext = null, _model = null, mode = 'new', templateInfo = null) {
   const existingFiles = (mode === 'patch') ? getExistingFiles(dir) : []
   const prompt = (mode === 'patch')
