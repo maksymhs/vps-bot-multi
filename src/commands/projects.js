@@ -162,7 +162,7 @@ function buildClaudePrompt(name, description, errorContext = null, templateInfo 
     `- src/routes/          → Separate routes if the app has multiple endpoints\n` +
     `- src/public/          → Static files (CSS, client JS, images) if applicable\n` +
     `- package.json         → name "${name}", "type": "module", scripts.start "node src/index.js"\n` +
-    `- Dockerfile           → First line: "# syntax=docker/dockerfile:1", then: FROM node:20-alpine, WORKDIR /app, COPY package*.json ., RUN --mount=type=cache,target=/root/.npm npm install --omit=dev, COPY . ., EXPOSE 3000, CMD ["node","src/index.js"]\n` +
+    `- Dockerfile           → First line must be "# syntax=docker/dockerfile:1". For plain Node apps: FROM node:20-alpine, WORKDIR /app, COPY package*.json ., RUN --mount=type=cache,target=/root/.npm npm install --omit=dev, COPY . ., EXPOSE 3000, CMD ["node","src/index.js"]. For Vite/React apps use multi-stage: builder stage with RUN --mount=type=cache,target=/root/.npm npm install and RUN --mount=type=cache,target=/app/node_modules/.vite npm run build, then a final node:20-alpine stage to serve the dist.\n` +
     `- .dockerignore        → node_modules, .git, .env, *.md\n` +
     `- .gitignore           → node_modules/, .env, dist/\n\n` +
     `RULES:\n` +
@@ -173,7 +173,8 @@ function buildClaudePrompt(name, description, errorContext = null, templateInfo 
     `5. Handle errors with Express middleware (404 + error handler)\n` +
     `6. Use ONLY ASCII characters in JS code. Never use − (U+2212), smart quotes, or other Unicode\n` +
     `7. Do NOT use import maps, do NOT use require(). Use ESM (import/export)\n` +
-    `8. Do NOT add the project name as a visible title. The app decides its own content\n\n` +
+    `8. Do NOT add the project name as a visible title. The app decides its own content\n` +
+    `9. Output order: Dockerfile first, package.json second, then all other files.\n\n` +
     `Write ALL files to disk. Code only, no explanations.`
 
   if (!errorContext) return base
@@ -211,6 +212,7 @@ function buildTemplatePrompt(name, description, templateInfo, errorContext = nul
     `7. Ensure GET /health returns { status: "ok" } — MANDATORY\n` +
     `8. Use ONLY ASCII characters in code\n` +
     `9. Do NOT add the project name as a visible title\n\n` +
+    `Output order: Dockerfile first, package.json second, then all other files.\n` +
     `Write ALL modified/new files to disk. Code only, no explanations.`
 
   if (errorContext) {
@@ -333,6 +335,7 @@ async function generateCode(dir, name, description, onProgress = null, errorCont
 file contents here
 --- END FILE ---
 
+CRITICAL OUTPUT ORDER: Always output Dockerfile first, then package.json second, then all remaining files. This order is mandatory.
 Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
   if (!config.openrouterKey) throw new Error('No AI provider available (set OPENROUTER_API_KEY in .env)')
