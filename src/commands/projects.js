@@ -162,7 +162,7 @@ function buildClaudePrompt(name, description, errorContext = null, templateInfo 
     `- src/routes/          → Separate routes if the app has multiple endpoints\n` +
     `- src/public/          → Static files (CSS, client JS, images) if applicable\n` +
     `- package.json         → name "${name}", "type": "module", scripts.start "node src/index.js"\n` +
-    `- Dockerfile           → FROM node:20-alpine, WORKDIR /app, COPY package*.json ., RUN npm install --omit=dev, COPY . ., EXPOSE 3000, CMD ["node","src/index.js"]\n` +
+    `- Dockerfile           → FROM node:20-alpine, WORKDIR /app, COPY package*.json ., RUN --mount=type=cache,target=/root/.npm npm install --omit=dev, COPY . ., EXPOSE 3000, CMD ["node","src/index.js"]\n` +
     `- .dockerignore        → node_modules, .git, .env, *.md\n` +
     `- .gitignore           → node_modules/, .env, dist/\n\n` +
     `RULES:\n` +
@@ -507,16 +507,18 @@ function parseMultiFileContent(content) {
 
 
 async function dockerComposeUp(dir, onProgress = null) {
+  const dockerEnv = { ...process.env, DOCKER_BUILDKIT: '1' }
+
   if (!onProgress) {
     // Modo simple (sin callbacks)
-    await run('docker', ['compose', 'up', '--build', '-d'], { cwd: dir })
+    await run('docker', ['compose', 'up', '--build', '-d'], { cwd: dir, env: dockerEnv })
     return
   }
 
   // Modo con salida simplificada
   return new Promise((resolve, reject) => {
     const allLines = []
-    const child = spawn('docker', ['compose', 'up', '--build', '-d'], { cwd: dir })
+    const child = spawn('docker', ['compose', 'up', '--build', '-d'], { cwd: dir, env: dockerEnv })
     const steps = new Set()
 
     const parseStep = (line) => {
@@ -598,7 +600,7 @@ async function getContainerLogsByFullName(containerFullName) {
   }
 }
 
-async function pollHealth(ip, port, timeoutMs = 40_000, onProgress = null) {
+async function pollHealth(ip, port, timeoutMs = 60_000, onProgress = null) {
   const deadline = Date.now() + timeoutMs
   let attempts = 0
 
@@ -607,15 +609,15 @@ async function pollHealth(ip, port, timeoutMs = 40_000, onProgress = null) {
     try {
       if (onProgress) {
         const elapsed = Math.round((Date.now() - (deadline - timeoutMs)) / 1000)
-        await onProgress(`Attempt ${attempts}: connecting to http://${ip}:${port}...`)
+        await onProgress(`Attempt ${attempts} (${elapsed}s): connecting to http://${ip}:${port}/health...`)
       }
 
-      const res = await fetch(`http://${ip}:${port}/`, {
+      const res = await fetch(`http://${ip}:${port}/health`, {
         signal: AbortSignal.timeout(3000),
       })
       if (res.status < 500) return true
     } catch { /* not ready yet */ }
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 1500))
   }
   return false
 }
@@ -664,10 +666,11 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
 
   // Ensure Dockerfile exists (fallback)
   if (!existsSync(join(dir, 'Dockerfile'))) {
-    const dockerfile = `FROM node:20-alpine
+    const dockerfile = `# syntax=docker/dockerfile:1
+FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN --mount=type=cache,target=/root/.npm npm install --omit=dev
 COPY . .
 EXPOSE 3000
 CMD ["npm", "start"]`
@@ -705,7 +708,13 @@ CMD ["npm", "start"]`
     healthHost = '127.0.0.1'
     healthPort = project.port
   } else {
-    const ip = await getContainerIpByFullName(containerFullName)
+    // Retry IP lookup — container may not have joined the network yet
+    let ip = null
+    for (let attempt = 0; attempt < 10; attempt++) {
+      ip = await getContainerIpByFullName(containerFullName)
+      if (ip) break
+      await new Promise(r => setTimeout(r, 1000))
+    }
     log.info(`[${logName}] container IP: ${ip || 'null'}`)
     if (!ip) {
       const logs = await getContainerLogsByFullName(containerFullName)
@@ -722,12 +731,12 @@ CMD ["npm", "start"]`
     log.build(logName, `Health: ${msg}`)
   }
 
-  const healthy = await pollHealth(healthHost, healthPort, 40_000, onHealthProgress)
+  const healthy = await pollHealth(healthHost, healthPort, 60_000, onHealthProgress)
   if (!healthy) {
     const containerLogs = await getContainerLogsByFullName(containerFullName)
-    log.buildError(logName, 'Health check failed after 40s', containerLogs)
-    log.error(`[${logName}] health check failed after 40s`, containerLogs)
-    throw new Error(`App not responding after 40s.\n${containerLogs.slice(-800)}`)
+    log.buildError(logName, 'Health check failed after 60s', containerLogs)
+    log.error(`[${logName}] health check failed after 60s`, containerLogs)
+    throw new Error(`App not responding after 60s.\n${containerLogs.slice(-800)}`)
   }
 
   const url = projectUrl(userId, name)
