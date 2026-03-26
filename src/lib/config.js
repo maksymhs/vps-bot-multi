@@ -5,9 +5,6 @@ import { join } from 'path'
 export const config = {
   // Paths
   projectsDir: process.env.PROJECTS_DIR ?? '/home/vpsbot/projects',
-  get usageFile() {
-    return join(process.cwd(), '.usage.json')
-  },
 
   // Network configuration
   // Can be either DOMAIN or IP_ADDRESS + PORT
