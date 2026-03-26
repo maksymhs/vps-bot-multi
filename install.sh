@@ -200,8 +200,9 @@ echo -e "  ${DIM}─────────────────────
 # BOT_TOKEN
 if [ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "your_telegram_bot_token" ]; then
     echo -e "  ${YELLOW}?${NC} Telegram Bot Token ${DIM}(from @BotFather)${NC}"
-    read -rp "    → " BOT_TOKEN
-    if [ -n "$BOT_TOKEN" ]; then
+    read -rp "    → " _INPUT_BOT
+    if [ -n "$_INPUT_BOT" ]; then
+        BOT_TOKEN="$_INPUT_BOT"
         sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=${BOT_TOKEN}|" "${INSTALL_DIR}/.env"
         echo -e "  ${GREEN}✔${NC} BOT_TOKEN saved"
     else
@@ -214,8 +215,9 @@ fi
 # OPENROUTER_API_KEY (required — DeepSeek code generation)
 if [ -z "$OPENROUTER_API_KEY" ] || [ "$OPENROUTER_API_KEY" = "sk-or-v1-your-key-here" ]; then
     echo -e "  ${YELLOW}?${NC} OpenRouter API Key ${DIM}(openrouter.ai/keys — uses DeepSeek V3)${NC}"
-    read -rp "    → " OPENROUTER_API_KEY
-    if [ -n "$OPENROUTER_API_KEY" ]; then
+    read -rp "    → " _INPUT_OR
+    if [ -n "$_INPUT_OR" ]; then
+        OPENROUTER_API_KEY="$_INPUT_OR"
         sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${OPENROUTER_API_KEY}|" "${INSTALL_DIR}/.env"
         echo -e "  ${GREEN}✔${NC} OPENROUTER_API_KEY saved"
     else
@@ -228,9 +230,9 @@ fi
 # DOMAIN or IP
 if [ -z "$DOMAIN" ] || [ "$DOMAIN" = "your-domain.com" ]; then
     echo -e "  ${YELLOW}?${NC} Domain ${DIM}(e.g. apps.example.com, or leave empty for IP mode)${NC}"
-    read -rp "    → " INPUT_DOMAIN
-    if [ -n "$INPUT_DOMAIN" ]; then
-        DOMAIN="$INPUT_DOMAIN"
+    read -rp "    → " _INPUT_DOMAIN
+    if [ -n "$_INPUT_DOMAIN" ]; then
+        DOMAIN="$_INPUT_DOMAIN"
         sed -i "s|^DOMAIN=.*|DOMAIN=${DOMAIN}|" "${INSTALL_DIR}/.env"
         echo -e "  ${GREEN}✔${NC} DOMAIN → ${DOMAIN}"
     else
@@ -252,8 +254,9 @@ fi
 if [ -z "$ADMIN_USER_ID" ] || [ "$ADMIN_USER_ID" = "123456789" ]; then
     echo -e "  ${YELLOW}?${NC} Your Telegram User ID ${DIM}(optional — press Enter to auto-detect)${NC}"
     echo -e "    ${DIM}The first person to /start the bot becomes admin automatically${NC}"
-    read -rp "    → " ADMIN_USER_ID
-    if [ -n "$ADMIN_USER_ID" ]; then
+    read -rp "    → " _INPUT_ADMIN
+    if [ -n "$_INPUT_ADMIN" ]; then
+        ADMIN_USER_ID="$_INPUT_ADMIN"
         sed -i "s|^ADMIN_USER_ID=.*|ADMIN_USER_ID=${ADMIN_USER_ID}|" "${INSTALL_DIR}/.env"
         echo -e "  ${GREEN}✔${NC} ADMIN_USER_ID → ${ADMIN_USER_ID}"
     else
@@ -424,4 +427,10 @@ else
     [ "$BOT_MISSING" = true ] && echo -e "  ${DIM}• Edit .env → set BOT_TOKEN${NC}"
     [ "$OR_MISSING" = true ] && echo -e "  ${DIM}• Edit .env → set OPENROUTER_API_KEY (get from openrouter.ai/keys)${NC}"
 fi
+
+# Guard against old install commands that appended `claude auth login`
+# If someone runs: curl | bash && claude auth login  — this makes it a no-op
+claude() { echo -e "  ${YELLOW}ℹ${NC} 'claude' is no longer part of this setup — you can remove it from your command."; }
+export -f claude 2>/dev/null || true
+
 echo ""
