@@ -187,6 +187,12 @@ else
     cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
 fi
 
+# Auto-load saved credentials from ~/.vpsbot (skips the wizard on reinstalls)
+if [ -f "$HOME/.vpsbot" ]; then
+    source "$HOME/.vpsbot" 2>/dev/null || true
+    echo -e "  ${GREEN}✔${NC} Credentials loaded from ~/.vpsbot"
+fi
+
 echo ""
 echo -e "  ${CYAN}${BOLD}Configuration${NC}"
 echo -e "  ${DIM}──────────────────────────────────────────${NC}"
@@ -382,6 +388,26 @@ OR_MISSING=false
 if [ "$BOT_MISSING" = false ] && [ "$OR_MISSING" = false ]; then
     echo -e "  ${GREEN}${BOLD}Bot is running! Open Telegram and send /start${NC}"
     echo -e "  ${DIM}Manage: systemctl status vps-bot-multi${NC}"
+
+    # Offer to save credentials to ~/.vpsbot for future reinstalls
+    if [ ! -f "$HOME/.vpsbot" ]; then
+        echo ""
+        echo -e "  ${CYAN}💾 Save credentials to ~/.vpsbot to skip this wizard next time?${NC} ${DIM}[Y/n]${NC}"
+        read -rp "    → " SAVE_CREDS
+        if [[ "${SAVE_CREDS:-y}" =~ ^[Yy]$ ]]; then
+            {
+                echo "# vpsbot saved credentials — auto-loaded by install.sh"
+                echo "BOT_TOKEN=${BOT_TOKEN}"
+                echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}"
+                [ -n "$DOMAIN" ] && echo "DOMAIN=${DOMAIN}"
+                [ -n "$ADMIN_USER_ID" ] && echo "ADMIN_USER_ID=${ADMIN_USER_ID}"
+            } > "$HOME/.vpsbot"
+            chmod 600 "$HOME/.vpsbot"
+            echo -e "  ${GREEN}✔${NC} Saved → ~/.vpsbot ${DIM}(next install will skip the wizard)${NC}"
+        fi
+    else
+        echo -e "  ${DIM}Credentials already saved in ~/.vpsbot${NC}"
+    fi
 else
     echo -e "  ${YELLOW}${BOLD}Next steps:${NC}"
     [ "$BOT_MISSING" = true ] && echo -e "  ${DIM}• Edit .env → set BOT_TOKEN${NC}"
