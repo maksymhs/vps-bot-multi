@@ -1186,8 +1186,11 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
       ...baseButtons,
     ])
   } else if (result === 'async') {
-    text = `🚀 *${name}*\n🌐 ${url}\n\n_Open the link — your app is building live inside the container._`
-    keyboard = Markup.inlineKeyboard(baseButtons)
+    text = `🚀 *${name}*\n🌐 ${url}\n\n_App is building live — tap Watch Live to follow progress._`
+    keyboard = Markup.inlineKeyboard([
+      [Markup.button.url('👁 Watch Live', url + '/console')],
+      ...baseButtons,
+    ])
   } else {
     text = `✅ *${name}* is ready\n🔗 ${url}`
     keyboard = Markup.inlineKeyboard(baseButtons)
@@ -1203,6 +1206,45 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
   }
 }
 
+// Poll container /health in background; edit the Telegram message to ✅ when app is running
+async function pollUntilReady(ctx, userId, name, loadingMsg) {
+  if (!loadingMsg) return
+  const containerName = userStore.containerName(userId, name)
+  // Wait for container IP (may take a couple seconds on first boot)
+  let host = null
+  for (let i = 0; i < 15; i++) {
+    try { host = await getContainerIpByFullName(containerName) } catch {}
+    if (host) break
+    await new Promise(r => setTimeout(r, 2000))
+  }
+  if (!host) return
+  const url = projectUrl(userId, name)
+  // Poll /health every 5s for up to 5 minutes
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 5000))
+    try {
+      const ctrl = new AbortController()
+      const tid = setTimeout(() => ctrl.abort(), 3000)
+      const resp = await fetch(`http://${host}:3000/health`, { signal: ctrl.signal })
+      clearTimeout(tid)
+      const data = await resp.json()
+      if (data.state === 'running') {
+        await sendProjectMessage(ctx, name, true, loadingMsg)
+        return
+      }
+      if (data.state === 'error') {
+        const { Markup } = await import('telegraf')
+        await ctx.telegram.editMessageText(
+          loadingMsg.chat.id, loadingMsg.message_id, null,
+          `❌ *${name}* build failed\n_[View error log](${url}/console)_`,
+          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.url('📋 Error log', url + '/console')]]) }
+        ).catch(() => {})
+        return
+      }
+    } catch { /* container not ready yet, keep polling */ }
+  }
+}
+
 export async function deployNew(ctx, name, description, model = null) {
   const userId = getUserId(ctx)
   const dir = userStore.projectDir(userId, name)
@@ -1213,6 +1255,7 @@ export async function deployNew(ctx, name, description, model = null) {
   if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
     await sendProjectMessage(ctx, name, result, loadingMsg)
+    if (result === 'async') pollUntilReady(ctx, userId, name, loadingMsg)
   } else if (loadingMsg) {
     await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {})
   }
@@ -1239,6 +1282,7 @@ export async function deployRebuild(ctx, name, description, model = null, mode =
   if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
     await sendProjectMessage(ctx, name, result, loadingMsg, mode)
+    if (result === 'async') pollUntilReady(ctx, userId, name, loadingMsg)
   } else if (loadingMsg) {
     await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {})
   }

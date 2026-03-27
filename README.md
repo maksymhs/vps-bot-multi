@@ -102,8 +102,9 @@ chmod 600 ~/.vpsbot
 - **Self-healing** — build errors and runtime crashes feed back to the agent automatically (up to 2 fix attempts)
 - **Permanent proxy architecture** — builder-server.js stays alive on :3000 forever; app runs on :3001 internally
 - **Instant HTTP rebuild** — `/rebuild` POST to the running container, no Docker restart whatsoever
-- **Loading → URL** — Telegram shows ⏳ immediately, edits in-place to the live URL when ready
-- **Watch Live button** — opens the `/console` SSE stream directly from Telegram while a patch runs
+- **Full lifecycle in one message** — ⏳ → 🚀 Watch Live → ✅ ready (single message edited in-place, no spam)
+- **Completion notification** — background poll on `/health`; edits to ✅ (or ❌) when build finishes
+- **Watch Live button** — opens the `/console` SSE stream directly from Telegram (on both new builds and rebuilds)
 - **Docker layer caching** — `npm install` layer cached when `package.json` unchanged between builds
 - **npm install skip** — skipped entirely if `package.json` didn't change during generation
 - **Auto-registration** — users created automatically on first `/start`
@@ -181,24 +182,36 @@ Browser auto-reloads → updated app live in seconds
 
 ## Telegram UX
 
-Bot sends an ⏳ loading message immediately, then edits it in-place when the app is ready:
+The bot edits a single message in-place through the whole lifecycle — no message spam:
 
-**New app:**
 ```
+⏳ my-kanban
+   Starting build...
+        ↓ (Docker up ~2s)
 🚀 my-kanban
 🌐 https://my-kanban.yourdomain.com
-
-[♻️ Rebuild]  [📋 Logs]
-[🔗 URL]      [⬅️ List]
+App is building live — tap Watch Live to follow progress.
+[👁 Watch Live]  [♻️ Rebuild]  [📋 Logs]  [🔗 URL]
+        ↓ (build completes, ~30-90s)
+✅ my-kanban is ready
+🔗 https://my-kanban.yourdomain.com
+[♻️ Rebuild]  [📋 Logs]  [🔗 URL]  [⬅️ List]
 ```
 
 **After rebuild:**
 ```
-🔨 Rebuilding my-kanban...
-
+⏳ my-kanban
+   Rebuilding...
+        ↓
+🔨 my-kanban is being patched
+Watch the changes live — tap the button below.
 [👁 Watch Live]
+        ↓
+✅ my-kanban is ready
 ```
-→ Watch Live opens the `/console` SSE stream so you can follow changes in real time.
+
+The ✅ notification is sent by a background poll on the container's `/health` endpoint.
+Watch Live opens the `/console` SSE stream so you can follow every tool call in real time.
 
 ### Commands
 
