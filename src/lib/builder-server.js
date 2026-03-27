@@ -71,14 +71,16 @@ function processLine(line) {
 }
 
 // ── Spawn helper: streams stdout+stderr to SSE as 'log' events ──────────────
-function spawnStreaming(cmd, args) {
+// capture=true: attaches full output to the rejected Error as .output (for error feedback)
+function spawnStreaming(cmd, args, capture) {
   return new Promise(function(resolve, reject) {
+    let out = ''
     const child = cp.spawn(cmd, args, { cwd: WORKSPACE, stdio: ['pipe', 'pipe', 'pipe'] })
-    child.stdout.on('data', function(d) { broadcast({ type: 'log', content: d.toString() }) })
-    child.stderr.on('data', function(d) { broadcast({ type: 'log', content: d.toString() }) })
+    child.stdout.on('data', function(d) { const s = d.toString(); broadcast({ type: 'log', content: s }); if (capture) out += s })
+    child.stderr.on('data', function(d) { const s = d.toString(); broadcast({ type: 'log', content: s }); if (capture) out += s })
     child.on('close', function(code) {
-      if (code === 0) resolve()
-      else reject(new Error(cmd + ' ' + args.join(' ') + ' exited with code ' + code))
+      if (code === 0) resolve(out)
+      else { const e = new Error(cmd + ' ' + args.join(' ') + ' exited ' + code); e.output = out; reject(e) }
     })
     child.on('error', reject)
   })
@@ -407,6 +409,12 @@ Workflow:
 4. Use write_file only for brand-new files
 5. When done, stop calling tools — return a short summary of what you changed
 
+Error-fixing workflow (when given BUILD or RUNTIME errors):
+1. Read the error message carefully to identify the exact file and line
+2. Call read_file on that file to see the current content
+3. Call edit_file to fix only the broken part — do not rewrite the file
+4. Fix one error at a time; re-read if needed
+
 Rules:
 - Read before editing — old_string must match exactly
 - Change only what is required. Preserve everything else.
@@ -414,18 +422,31 @@ Rules:
 - Keep GET /health → { status: "ok" } working
 - App must use process.env.PORT for its listen port`
 
-const AGENT_MAX_ITERS = 14
+const AGENT_MAX_ITERS  = 14
+const MAX_FIX_ATTEMPTS = 2   // max retry rounds on build/crash error
 
-async function runAgenticPatch(description) {
-  broadcast({ type: 'status', message: 'Agent is analyzing the codebase...' })
-  console.log('[agent] patch:', description)
+async function runAgenticPatch(description, errorContext, attempt) {
+  if (attempt === undefined) attempt = 0
+  const isRetry = attempt > 0
+
+  const statusMsg = isRetry
+    ? 'Agent fixing errors (attempt ' + (attempt + 1) + ')...'
+    : 'Agent is analyzing the codebase...'
+  broadcast({ type: 'status', message: statusMsg })
+  if (isRetry) broadcast({ type: 'log', content: '\n⚠️  Error detected — agent will fix it...\n' })
+  console.log('[agent] patch attempt', attempt, description.slice(0, 80))
 
   let pkgJsonBefore = ''
   try { pkgJsonBefore = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
 
+  // If retrying, prepend error context so the agent knows exactly what to fix
+  const userContent = errorContext
+    ? 'Fix these errors in the app, then make sure it runs:\n\n' + errorContext.slice(0, 2500) + '\n\n---\nOriginal task: ' + description
+    : 'Apply this change to the web app: ' + description
+
   const messages = [
     { role: 'system',  content: AGENT_SYSTEM },
-    { role: 'user',    content: 'Apply this change to the web app: ' + description },
+    { role: 'user',    content: userContent },
   ]
 
   for (let iter = 0; iter < AGENT_MAX_ITERS; iter++) {
@@ -550,30 +571,45 @@ async function runAgenticPatch(description) {
   try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
   if (pkgJsonBefore !== pkgJsonAfter || !fs.existsSync(path.join(WORKSPACE, 'node_modules'))) {
     broadcast({ type: 'phase', phase: 'install', message: 'Installing new dependencies...' })
-    try { await spawnStreaming('npm', ['install']) }
-    catch (err) { return fail('npm install failed: ' + err.message) }
+    try { await spawnStreaming('npm', ['install'], true) }
+    catch (err) {
+      const out = (err.output || err.message).slice(0, 2000)
+      if (attempt < MAX_FIX_ATTEMPTS) return runAgenticPatch(description, 'NPM INSTALL FAILED:\n' + out, attempt + 1)
+      return fail('npm install failed after ' + (attempt + 1) + ' attempts')
+    }
   }
 
-  // ── npm run build if needed ────────────────────────────────────────────────
+  // ── npm run build if needed — capture output for error feedback ─────────────
+  let startBin = 'node', startArgs = ['src/index.js']
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
+    startBin  = pkg.scripts?.start ? pkg.scripts.start.trim().split(/\s+/)[0] : 'node'
+    startArgs = pkg.scripts?.start ? pkg.scripts.start.trim().split(/\s+/).slice(1) : ['src/index.js']
     if (pkg.scripts?.build) {
-      broadcast({ type: 'phase', phase: 'build', message: 'Rebuilding...' })
-      await spawnStreaming('npm', ['run', 'build'])
+      broadcast({ type: 'phase', phase: 'build', message: isRetry ? 'Rebuilding after fix...' : 'Building...' })
+      try {
+        await spawnStreaming('npm', ['run', 'build'], true)
+      } catch (err) {
+        const out = (err.output || err.message).slice(0, 2500)
+        if (attempt < MAX_FIX_ATTEMPTS) {
+          broadcast({ type: 'log', content: '❌ Build failed — asking agent to fix...\n' })
+          return runAgenticPatch(description, 'BUILD ERROR (fix this before anything else):\n' + out, attempt + 1)
+        }
+        return fail('Build failed after ' + (attempt + 1) + ' fix attempts:\n' + out.slice(-600))
+      }
     }
   } catch {}
 
-  // ── Restart app ────────────────────────────────────────────────────────────
-  let startBin = 'node', startArgs = ['src/index.js']
-  try {
-    const pkg   = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
-    const parts = ((pkg.scripts?.start) || 'node src/index.js').trim().split(/\s+/)
-    startBin = parts[0]; startArgs = parts.slice(1)
-  } catch {}
-
-  broadcast({ type: 'launching', message: 'Restarting with patch applied...' })
+  // ── Launch app — retry with crash log if it dies quickly ──────────────────
+  broadcast({ type: 'launching', message: isRetry ? 'Relaunching after fix...' : 'Launching app...' })
   const crashError = await spawnApp(startBin, startArgs)
-  if (crashError) fail('App crashed after patch:\n' + crashError.slice(-500))
+  if (crashError) {
+    if (attempt < MAX_FIX_ATTEMPTS) {
+      broadcast({ type: 'log', content: '❌ App crashed — asking agent to fix...\n' })
+      return runAgenticPatch(description, 'RUNTIME CRASH (the app started then immediately died):\n' + crashError.slice(0, 2000), attempt + 1)
+    }
+    fail('App failed to start after ' + (attempt + 1) + ' fix attempts:\n' + crashError.slice(-600))
+  }
 }
 
 // ── In-container rebuild triggered via HTTP ──────────────────────────────────
