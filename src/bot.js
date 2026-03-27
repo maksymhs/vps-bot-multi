@@ -117,8 +117,7 @@ bot.on('text', async (ctx, next) => {
       await ctx.reply(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
     }
 
-    enqueueBuild(buildKey, () => deployRebuild(ctx, name, description, null, mode))
-      .then(ok => { if (ok) showProject(ctx, name).catch(() => {}) })
+    enqueueBuild(buildKey, () => deployRebuild(ctx, name, description, null, mode, input))
       .catch(err => {
         console.error('Rebuild error:', err)
         ctx.reply(`❌ *${name}* — Rebuild failed: ${(err.message || err).toString().slice(0, 300)}`, { parse_mode: 'Markdown' }).catch(() => {})
@@ -127,40 +126,10 @@ bot.on('text', async (ctx, next) => {
     return
   }
 
-  // Conversational rebuild: plain text → patch last active project
-  // No need for menus — just type what you want changed
-  const lastProject = userStore.getLastProject(userId)
-  if (lastProject) {
-    const project = userStore.getProject(userId, lastProject)
-    if (project) {
-      const input = ctx.message.text.trim()
-      const description = `${project.description}\n\nRequested changes: ${input}`
-      const slug = userStore.getUserSlug(userId)
-      const buildKey = `${slug}-${lastProject}`
-      if (buildingSet.has(buildKey)) {
-        // Queue the change — will be applied automatically when the current build finishes
-        const q = changeQueue.get(String(userId)) || []
-        q.push({ description, input, ctx })
-        changeQueue.set(String(userId), q)
-        return ctx.reply(
-          `📝 *${lastProject}* is building — change queued (${q.length} pending).\n_Will apply automatically when done._`,
-          { parse_mode: 'Markdown' }
-        )
-      }
-      buildingSet.add(buildKey)
-      const qs = getQueueStatus()
-      if (qs.waiting > 0) await ctx.reply(`⏳ *${lastProject}* — queued (${qs.waiting} ahead)`, { parse_mode: 'Markdown' })
-      enqueueBuild(buildKey, () => deployRebuild(ctx, lastProject, description, null, 'patch', input))
-        .finally(() => buildingSet.delete(buildKey))
-      return
-    }
-  }
-
-  // New project flow
-  const state = pendingNew.get(ctx.chat.id)
-  if (!state) return next()
-
-  if (state.step === 'desc') {
+  // New project flow — check BEFORE lastProject so a description typed here
+  // is never mistaken for a change to the previously active project.
+  const newState = pendingNew.get(ctx.chat.id)
+  if (newState?.step === 'desc') {
     const description = ctx.message.text.trim()
     pendingNew.delete(ctx.chat.id)
 
@@ -198,6 +167,38 @@ bot.on('text', async (ctx, next) => {
     return
   }
 
+  // Conversational rebuild: plain text → patch last active project
+  // No need for menus — just type what you want changed.
+  // Only reached when NOT in a pendingNew or pendingRebuild flow.
+  const lastProject = userStore.getLastProject(userId)
+  if (lastProject) {
+    const project = userStore.getProject(userId, lastProject)
+    if (project) {
+      const input = ctx.message.text.trim()
+      const description = `${project.description}\n\nRequested changes: ${input}`
+      const slug = userStore.getUserSlug(userId)
+      const buildKey = `${slug}-${lastProject}`
+      if (buildingSet.has(buildKey)) {
+        // Queue the change — will be applied automatically when the current build finishes
+        const q = changeQueue.get(String(userId)) || []
+        q.push({ description, input, ctx })
+        changeQueue.set(String(userId), q)
+        return ctx.reply(
+          `📝 *${lastProject}* is building — change queued (${q.length} pending).\n_Will apply automatically when done._`,
+          { parse_mode: 'Markdown' }
+        )
+      }
+      buildingSet.add(buildKey)
+      const qs = getQueueStatus()
+      if (qs.waiting > 0) await ctx.reply(`⏳ *${lastProject}* — queued (${qs.waiting} ahead)`, { parse_mode: 'Markdown' })
+      enqueueBuild(buildKey, () => deployRebuild(ctx, lastProject, description, null, 'patch', input))
+        .finally(() => buildingSet.delete(buildKey))
+      return
+    }
+  }
+
+  // Nothing matched — pass through
+  return next()
 })
 
 // ── Inline button actions ──────────────────────────────────────────────────

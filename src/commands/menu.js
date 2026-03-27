@@ -202,6 +202,8 @@ export async function startNewFlow(ctx) {
     )
   }
 
+  // Clear conversational context so the new description doesn't patch the old project
+  userStore.clearLastProject(userId)
   pendingNew.set(ctx.chat.id, { step: 'desc' })
   return ctx.editMessageText(
     '➕ *New project*\n\nDescribe what your app should do:\n\n_The name will be generated automatically._',
