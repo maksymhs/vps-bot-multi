@@ -47,11 +47,31 @@
    │
    ▼
   real app spawned on :3001 — builder proxy forwards :3000 → :3001
-  Browser auto-reloads → real app is live
+  Browser auto-reloads → real app is live ✓
   Caddy → https://john-kanban.yourdomain.com ✓
 ```
 
 **The container never restarts.** builder-server.js stays alive as a permanent proxy. The app runs on an internal port.
+
+### Live browser sync (zero interaction)
+
+Every HTML page served by the proxy has a tiny watcher script injected. When a rebuild fires from Telegram the open browser tab switches on its own:
+
+```
+app open in browser
+  │ (watcher polls /health every 2s)
+  │
+user sends change from Telegram
+  │
+state = 'building'
+  ↓
+browser auto-redirects → /console   ← no click needed
+  │ (SSE replay shows full history)
+  │
+build completes → state = 'running'
+  ↓
+browser auto-reloads → updated app  ← no click needed
+```
 
 ---
 
@@ -105,6 +125,7 @@ chmod 600 ~/.vpsbot
 - **Full lifecycle in one message** — ⏳ → 🚀 Watch Live → ✅ ready (single message edited in-place, no spam)
 - **Completion notification** — background poll on `/health`; edits to ✅ (or ❌) when build finishes
 - **Watch Live button** — opens the `/console` SSE stream directly from Telegram (on both new builds and rebuilds)
+- **Auto browser sync** — injected watcher redirects open tab to console on rebuild, reloads app when done; zero clicks needed
 - **Docker layer caching** — `npm install` layer cached when `package.json` unchanged between builds
 - **npm install skip** — skipped entirely if `package.json` didn't change during generation
 - **Auto-registration** — users created automatically on first `/start`
@@ -138,6 +159,7 @@ Each project runs in a single Docker container. `builder-server.js` is a **perma
 │                                                          │
 │  BUILD PHASE — builder-server.js                         │
 │    serves /console + /events (SSE) on :3000              │
+│    SSE replay buffer (300 events) + heartbeat every 4s   │
 │    → plan+execute: 1 call, all files → JSON edits        │
 │      fallback: tool loop (read/edit/write, ≤14 iters)    │
 │      or streaming generation (generate mode)             │
@@ -146,7 +168,9 @@ Each project runs in a single Docker container. `builder-server.js` is a **perma
 │    → spawn app :3001 (crash → agent fixes → retry)       │
 │                                                          │
 │  RUNNING PHASE                                           │
-│    :3000 proxies all traffic → :3001                     │
+│    :3000 proxies HTML → injects REBUILD_WATCHER script   │
+│      polls /health 2s → auto-redirect to console         │
+│      on rebuild; auto-reload to app when done            │
 │    /rebuild POST → kills app, reruns build phase         │
 │    /console → SSE live log always available              │
 └─────────────────────────────────────────────────────────┘
@@ -212,6 +236,8 @@ Watch the changes live — tap the button below.
 
 The ✅ notification is sent by a background poll on the container's `/health` endpoint.
 Watch Live opens the `/console` SSE stream so you can follow every tool call in real time.
+
+> **Tip:** keep the app open in a browser tab. When you send any change from Telegram the tab switches to the live console automatically and reloads to the updated app when done — no manual refresh ever needed.
 
 ### Commands
 
