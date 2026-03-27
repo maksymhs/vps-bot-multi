@@ -1,36 +1,43 @@
-// builder-server.js — runs INSIDE the Docker builder container
-// Calls OpenRouter/DeepSeek, streams output to browser via SSE, writes files to /workspace
-// Uses only Node.js built-ins (http, fs, path) + global fetch (Node 18+)
+// builder-server.js — runs INSIDE the Docker container
+// Flow: serve web console → call DeepSeek → write files → npm install → npm build → spawn app
+// Uses only Node.js built-ins + global fetch (Node 18+). No external deps.
 'use strict'
 
 const http = require('http')
 const fs   = require('fs')
 const path = require('path')
+const cp   = require('child_process')
 
-const WORKSPACE = process.env.WORKSPACE_DIR || '/workspace'
+const WORKSPACE = process.env.WORKSPACE_DIR || '/app'
 const PORT      = 3000
 const OR_KEY    = process.env.OPENROUTER_API_KEY || ''
 const PROJECT   = process.env.PROJECT_NAME       || 'app'
 const MODEL     = process.env.MODEL              || 'deepseek/deepseek-chat-v3-0324'
 
+// Files the AI must not overwrite
+const PROTECTED = new Set([
+  'builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt',
+  'docker-compose.yml', 'Dockerfile',
+])
+
 // ── State ──────────────────────────────────────────────────────────────────
-let state        = 'building' // 'building' | 'done' | 'error'
+let state        = 'building'   // 'building' | 'installing' | 'error'
 let buildError   = null
 let filesWritten = 0
 const sseClients = []
 
-// ── SSE broadcast ──────────────────────────────────────────────────────────
+// ── SSE helpers ────────────────────────────────────────────────────────────
 function broadcast(obj) {
   const msg = 'data: ' + JSON.stringify(obj) + '\n\n'
   for (const res of sseClients) try { res.write(msg) } catch {}
 }
 
-// ── Streaming file parser (same logic as projects.js generateCode) ─────────
+// ── File writer ────────────────────────────────────────────────────────────
 let currentFile  = null
 let contentLines = []
 
 function writeProjectFile(filename, content) {
-  if (!filename || filename.includes('..')) return
+  if (!filename || filename.includes('..') || PROTECTED.has(path.basename(filename))) return
   const p = path.join(WORKSPACE, filename)
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true })
@@ -39,7 +46,7 @@ function writeProjectFile(filename, content) {
     broadcast({ type: 'file', name: filename, size: content.length })
     console.log('[builder] wrote:', filename, '(' + content.length + 'B)')
   } catch (err) {
-    broadcast({ type: 'status', message: 'Write error: ' + err.message })
+    broadcast({ type: 'log', content: 'Write error: ' + err.message + '\n' })
   }
 }
 
@@ -57,64 +64,82 @@ function processLine(line) {
   if (currentFile !== null) contentLines.push(line)
 }
 
-// ── AI generation ──────────────────────────────────────────────────────────
-async function runGeneration() {
+// ── Spawn helper: streams stdout+stderr to SSE as 'log' events ─────────────
+function spawnStreaming(cmd, args) {
+  return new Promise(function(resolve, reject) {
+    const child = cp.spawn(cmd, args, { cwd: WORKSPACE, stdio: ['pipe', 'pipe', 'pipe'] })
+    child.stdout.on('data', function(d) { broadcast({ type: 'log', content: d.toString() }) })
+    child.stderr.on('data', function(d) { broadcast({ type: 'log', content: d.toString() }) })
+    child.on('close', function(code) {
+      if (code === 0) resolve()
+      else reject(new Error(cmd + ' ' + args.join(' ') + ' exited with code ' + code))
+    })
+    child.on('error', reject)
+  })
+}
+
+// ── Error handler ──────────────────────────────────────────────────────────
+function fail(msg) {
+  state      = 'error'
+  buildError = msg
+  broadcast({ type: 'error', message: msg })
+  try { fs.writeFileSync(path.join(WORKSPACE, '.build-error'), msg) } catch {}
+  console.error('[builder] error:', msg)
+}
+
+// ── Main pipeline: generate → install → build → launch ────────────────────
+async function runAll() {
+  // ── 1. Read prompts ───────────────────────────────────────────────────────
   broadcast({ type: 'status', message: 'Reading build prompt...' })
   let prompt, systemPrompt
   try {
     prompt       = fs.readFileSync(path.join(WORKSPACE, '.build-prompt.txt'), 'utf8')
     systemPrompt = fs.readFileSync(path.join(WORKSPACE, '.build-system-prompt.txt'), 'utf8')
   } catch (err) {
-    state      = 'error'
-    buildError = 'Cannot read prompt: ' + err.message
-    broadcast({ type: 'error', message: buildError })
-    fs.writeFileSync(path.join(WORKSPACE, '.build-error'), buildError)
-    return
+    return fail('Cannot read prompt: ' + err.message)
   }
 
-  broadcast({ type: 'status', message: 'Calling DeepSeek via OpenRouter...' })
-  console.log('[builder] calling OpenRouter model:', MODEL)
-
+  // ── 2. Call DeepSeek via OpenRouter ──────────────────────────────────────
+  broadcast({ type: 'status', message: 'Calling DeepSeek...' })
+  console.log('[builder] model:', MODEL)
   try {
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': 'Bearer ' + OR_KEY,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://vps-bot-multi.local',
-        'X-Title': 'VPS-Bot-Multi',
+        'Content-Type':  'application/json',
+        'HTTP-Referer':  'https://vps-bot-multi.local',
+        'X-Title':       'VPS-Bot-Multi',
       },
       body: JSON.stringify({
-        model: MODEL,
-        messages: [
+        model:      MODEL,
+        messages:   [
           { role: 'system', content: systemPrompt },
           { role: 'user',   content: prompt },
         ],
         max_tokens: 16384,
-        stream: true,
+        stream:     true,
       }),
     })
 
     if (!res.ok) {
       const txt = await res.text()
-      throw new Error('OpenRouter ' + res.status + ': ' + txt.slice(0, 300))
+      return fail('OpenRouter ' + res.status + ': ' + txt.slice(0, 300))
     }
 
-    broadcast({ type: 'status', message: 'Streaming response...' })
+    broadcast({ type: 'status', message: 'Generating files...' })
 
-    const reader  = res.body.getReader()
-    const decoder = new TextDecoder()
-    let sseBuffer = ''
+    const reader   = res.body.getReader()
+    const decoder  = new TextDecoder()
+    let sseBuffer  = ''
     let textBuffer = ''
 
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-
       sseBuffer += decoder.decode(value, { stream: true })
       const lines = sseBuffer.split('\n')
       sseBuffer = lines.pop()
-
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue
         const data = line.slice(6).trim()
@@ -131,22 +156,57 @@ async function runGeneration() {
         } catch {}
       }
     }
-
     if (textBuffer) processLine(textBuffer)
     commitFile()
-
-    state = 'done'
-    fs.writeFileSync(path.join(WORKSPACE, '.build-complete'), String(filesWritten))
-    broadcast({ type: 'done', filesWritten })
-    console.log('[builder] done —', filesWritten, 'files written')
-
+    console.log('[builder] generation done —', filesWritten, 'files')
   } catch (err) {
-    state      = 'error'
-    buildError = err.message
-    broadcast({ type: 'error', message: buildError })
-    fs.writeFileSync(path.join(WORKSPACE, '.build-error'), buildError)
-    console.error('[builder] error:', buildError)
+    return fail(err.message)
   }
+
+  // ── 3. npm install ────────────────────────────────────────────────────────
+  state = 'installing'
+  broadcast({ type: 'phase', phase: 'install', message: 'Installing dependencies...' })
+  try {
+    await spawnStreaming('npm', ['install'])
+  } catch (err) {
+    return fail('npm install failed: ' + err.message)
+  }
+
+  // ── 4. npm run build (optional) ───────────────────────────────────────────
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
+    if (pkg.scripts && pkg.scripts.build) {
+      broadcast({ type: 'phase', phase: 'build', message: 'Building...' })
+      await spawnStreaming('npm', ['run', 'build'])
+    }
+  } catch {}
+
+  // ── 5. Resolve start command ──────────────────────────────────────────────
+  let startBin  = 'node'
+  let startArgs = ['src/index.js']
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
+    const startScript = (pkg.scripts && pkg.scripts.start) || 'node src/index.js'
+    const parts = startScript.trim().split(/\s+/)
+    startBin  = parts[0]
+    startArgs = parts.slice(1)
+  } catch {}
+
+  // ── 6. Signal browser, close server, spawn app ────────────────────────────
+  broadcast({ type: 'launching', message: 'Launching app...' })
+  console.log('[builder] launching:', startBin, startArgs.join(' '))
+
+  server.close(function() {
+    setTimeout(function() {
+      const app = cp.spawn(startBin, startArgs, {
+        cwd:      WORKSPACE,
+        stdio:    'inherit',
+        detached: false,
+      })
+      app.on('exit',  function(code) { process.exit(code || 0) })
+      app.on('error', function(err)  { console.error('[app]', err.message); process.exit(1) })
+    }, 300)
+  })
 }
 
 // ── Web console HTML ───────────────────────────────────────────────────────
@@ -174,13 +234,15 @@ html,body{height:100%;background:#0d1117;color:#c9d1d9;font-family:'SF Mono','Fi
 .sf{color:#3fb950;font-weight:600}
 .ef{color:#21262d}
 .st{color:#58a6ff}
+.lg{color:#8b949e}
 .er{color:#f85149}
 .cd{color:#c9d1d9}
 .partial{color:#c9d1d9}
 .cursor{display:inline-block;width:7px;height:13px;background:#58a6ff;animation:bl .85s step-end infinite;vertical-align:middle;margin-left:1px}
 @keyframes bl{50%{opacity:0}}
 .footbar{background:#1f6feb;padding:7px 18px;font-size:12px;color:#fff;display:flex;justify-content:space-between;flex-shrink:0;transition:background .3s}
-.footbar.done{background:#238636}
+.footbar.install{background:#9e6a03}
+.footbar.launch{background:#238636}
 .footbar.err{background:#da3633}
 </style>
 </head>
@@ -196,7 +258,7 @@ html,body{height:100%;background:#0d1117;color:#c9d1d9;font-family:'SF Mono','Fi
 </div>
 <div class="statbar">
   <span>files: <span class="v" id="fc">0</span></span>
-  <span>status: <span class="v" id="st">connecting...</span></span>
+  <span>phase: <span class="v" id="ph">generating</span></span>
 </div>
 <div id="console"></div>
 <div class="footbar" id="fb">
@@ -204,23 +266,23 @@ html,body{height:100%;background:#0d1117;color:#c9d1d9;font-family:'SF Mono','Fi
   <span>⚡ OpenRouter</span>
 </div>
 <script>
-const con   = document.getElementById('console')
-const fcEl  = document.getElementById('fc')
-const stEl  = document.getElementById('st')
-const fb    = document.getElementById('fb')
-const fbL   = document.getElementById('fb-left')
-const timer = document.getElementById('timer')
+var con   = document.getElementById('console')
+var fcEl  = document.getElementById('fc')
+var phEl  = document.getElementById('ph')
+var fb    = document.getElementById('fb')
+var fbL   = document.getElementById('fb-left')
+var timer = document.getElementById('timer')
 
-const t0 = Date.now()
+var t0 = Date.now()
 setInterval(function() { timer.textContent = Math.round((Date.now()-t0)/1000)+'s' }, 1000)
 
-let buf = ''
-let partialEl = null
-let fileCount = 0
+var buf = ''
+var partialEl = null
+var fileCount = 0
 
 function appendLine(text, cls) {
   if (partialEl) { partialEl.remove(); partialEl = null }
-  const d = document.createElement('div')
+  var d = document.createElement('div')
   d.className = cls || 'cd'
   d.textContent = text
   con.appendChild(d)
@@ -232,8 +294,8 @@ function showPartial() {
   if (partialEl) partialEl.remove()
   partialEl = document.createElement('div')
   partialEl.className = 'partial'
-  const txt = document.createTextNode(buf)
-  const cur = document.createElement('span')
+  var txt = document.createTextNode(buf)
+  var cur = document.createElement('span')
   cur.className = 'cursor'
   partialEl.appendChild(txt)
   partialEl.appendChild(cur)
@@ -243,61 +305,82 @@ function showPartial() {
 
 function onChunk(text) {
   buf += text
-  const lines = buf.split('\\n')
+  var lines = buf.split('\\n')
   buf = lines.pop()
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i]
     var cls = 'cd'
-    if (line.indexOf('--- FILE:') === 0)    cls = 'sf'
+    if (line.indexOf('--- FILE:') === 0)     cls = 'sf'
     else if (line.indexOf('--- END FILE') === 0) cls = 'ef'
     appendLine(line, cls)
   }
   showPartial()
 }
 
-const es = new EventSource('/events')
+function pollAndReload() {
+  fetch('/health').then(function(r) { return r.json() }).then(function(d) {
+    if (!d.loading) setTimeout(function() { location.reload() }, 1000)
+    else setTimeout(pollAndReload, 2000)
+  }).catch(function() {
+    // server closed — app is starting up
+    setTimeout(function() { location.reload() }, 2000)
+  })
+}
+
+var es = new EventSource('/events')
 es.onmessage = function(e) {
   var d = JSON.parse(e.data)
+
   if (d.type === 'status') {
-    stEl.textContent = d.message
     appendLine('> ' + d.message, 'st')
+
   } else if (d.type === 'chunk') {
     onChunk(d.content)
+
   } else if (d.type === 'file') {
     fileCount++
     fcEl.textContent = fileCount
-  } else if (d.type === 'done') {
+
+  } else if (d.type === 'phase') {
     if (partialEl) { partialEl.remove(); partialEl = null }
     appendLine('')
-    appendLine('✓ ' + d.filesWritten + ' files written — rebuilding container...', 'sf')
-    stEl.textContent = 'done'
-    fb.className = 'footbar done'
-    fbL.textContent = '✓ Done! Container is rebuilding...'
+    appendLine('── ' + d.message, 'st')
+    phEl.textContent = d.phase
+    if (d.phase === 'install') {
+      fb.className = 'footbar install'
+      fbL.textContent = 'Installing dependencies...'
+    } else if (d.phase === 'build') {
+      fbL.textContent = 'Building...'
+    }
+
+  } else if (d.type === 'log') {
+    // npm install / build output — split by newline
+    var lines = d.content.split('\\n')
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i]) appendLine(lines[i], 'lg')
+    }
+
+  } else if (d.type === 'launching') {
+    appendLine('')
+    appendLine('── ' + d.message, 'sf')
+    phEl.textContent = 'launching'
+    fb.className = 'footbar launch'
+    fbL.textContent = 'App is starting...'
     es.close()
-    setTimeout(pollApp, 2000)
+    setTimeout(pollAndReload, 1500)
+
   } else if (d.type === 'error') {
     if (partialEl) { partialEl.remove(); partialEl = null }
-    appendLine('✗ ERROR: ' + d.message, 'er')
-    stEl.textContent = 'error'
+    appendLine('')
+    appendLine('✗ ' + d.message, 'er')
+    phEl.textContent = 'error'
     fb.className = 'footbar err'
-    fbL.textContent = '✗ Build error — check logs'
+    fbL.textContent = '✗ Build failed'
     es.close()
   }
 }
 
-es.onerror = function() { es.close(); setTimeout(pollApp, 3000) }
-
-function pollApp() {
-  fetch('/health').then(function(r) { return r.json() }).then(function(d) {
-    if (!d.loading && !d.done) {
-      location.reload()
-    } else {
-      setTimeout(pollApp, 2000)
-    }
-  }).catch(function() {
-    setTimeout(function() { location.reload() }, 3000)
-  })
-}
+es.onerror = function() { es.close(); setTimeout(pollAndReload, 3000) }
 </script>
 </body>
 </html>`
@@ -309,11 +392,9 @@ const server = http.createServer(function(req, res) {
   if (url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     return res.end(JSON.stringify({
-      status:       buildError ? 'error' : 'ok',
-      loading:      state === 'building',
-      done:         state === 'done',
-      filesWritten,
-      error:        buildError,
+      status:  buildError ? 'error' : 'ok',
+      loading: state !== 'error',
+      error:   buildError,
     }))
   }
 
@@ -324,7 +405,7 @@ const server = http.createServer(function(req, res) {
       'Connection':    'keep-alive',
     })
     res.write('retry: 3000\n\n')
-    res.write('data: ' + JSON.stringify({ type: 'connected', status: state }) + '\n\n')
+    res.write('data: ' + JSON.stringify({ type: 'connected', state }) + '\n\n')
     sseClients.push(res)
     req.on('close', function() {
       const i = sseClients.indexOf(res)
@@ -339,5 +420,5 @@ const server = http.createServer(function(req, res) {
 
 server.listen(PORT, function() {
   console.log('[builder] server on :' + PORT + '  project=' + PROJECT)
-  setTimeout(runGeneration, 800)
+  setTimeout(runAll, 800)
 })

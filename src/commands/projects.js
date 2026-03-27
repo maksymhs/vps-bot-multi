@@ -15,77 +15,11 @@ const BUILDER_SERVER_JS = readFileSync(join(__dirname, '../lib/builder-server.js
 
 const MAX_RETRIES = 2
 
-// ── Loading server ────────────────────────────────────────────────────────────
-// Injected in Phase 1 so the user has a live URL from the first seconds.
-// The AI overwrites Dockerfile in Phase 2; loading artifacts are cleaned up
-// before Phase 3 rebuilds with the real app.
-
-const LOADING_HTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Building your app...</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#09090b;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
-.wrap{text-align:center;padding:2rem}
-.ring{width:52px;height:52px;border-radius:50%;border:3px solid #27272a;border-top-color:#6366f1;animation:spin .8s linear infinite;margin:0 auto 1.75rem}
-@keyframes spin{to{transform:rotate(360deg)}}
-h1{font-size:1.4rem;font-weight:600;color:#fafafa;margin-bottom:.5rem}
-p{color:#71717a;font-size:.875rem;line-height:1.6;max-width:280px;margin:0 auto}
-.dots span{animation:blink 1.4s infinite both}
-.dots span:nth-child(2){animation-delay:.2s}
-.dots span:nth-child(3){animation-delay:.4s}
-@keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="ring"></div>
-  <h1>Building your app<span class="dots"><span>.</span><span>.</span><span>.</span></span></h1>
-  <p>AI is generating your code.<br>This page will update automatically.</p>
-</div>
-<script>
-let _fails=0,_wasLoading=false
-setInterval(async()=>{
-  try{
-    const r=await fetch('/health?_='+Date.now())
-    const d=await r.json()
-    if(d.loading){_wasLoading=true;_fails=0;return}
-    location.reload()
-  }catch(e){
-    // container is rebuilding — after enough failures, reload to catch real app
-    if(_wasLoading&&++_fails>15)location.reload()
-  }
-},2000)
-setTimeout(()=>location.reload(),600000)
-</script>
-</body>
-</html>`
-
-const LOADING_SERVER_JS = `const http = require('http')
-const html = ${JSON.stringify(LOADING_HTML)}
-http.createServer((req, res) => {
-  if (req.url === '/health') {
-    res.writeHead(200, {'Content-Type': 'application/json'})
-    return res.end('{"status":"ok","loading":true}')
-  }
-  res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'})
-  res.end(html)
-}).listen(3000)
-`
-
-const LOADING_DOCKERFILE = `FROM node:20-alpine
-WORKDIR /app
-COPY loading-server.js .
-EXPOSE 3000
-CMD ["node", "loading-server.js"]
-`
-
+// Single Dockerfile: copies the full project dir (with template files + builder-server.js)
+// and runs the builder which handles generation → install → app launch internally.
 const BUILDER_DOCKERFILE = `FROM node:20-alpine
 WORKDIR /app
-COPY builder-server.js .
+COPY . .
 EXPOSE 3000
 CMD ["node", "builder-server.js"]
 `
@@ -250,7 +184,7 @@ networks:
   writeFileSync(join(dir, 'docker-compose.yml'), compose)
 }
 
-// Builder compose: like writeComposeFile but adds volume mount + env vars for the AI builder container
+// Builder compose: adds env vars for the AI builder container (no volume needed — files are baked in)
 function writeBuilderComposeFile(dir, userId, name) {
   const containerName = userStore.containerName(userId, name)
   const subdomain = name
@@ -261,8 +195,6 @@ function writeBuilderComposeFile(dir, userId, name) {
     container_name: ${containerName}
     build: .
     restart: unless-stopped
-    volumes:
-      - .:/workspace
     environment:
       - OPENROUTER_API_KEY=${config.openrouterKey || ''}
       - PROJECT_NAME=${name}
@@ -291,8 +223,6 @@ networks:
     container_name: ${containerName}
     build: .
     restart: unless-stopped
-    volumes:
-      - .:/workspace
     environment:
       - OPENROUTER_API_KEY=${config.openrouterKey || ''}
       - PROJECT_NAME=${name}
@@ -308,58 +238,16 @@ networks:
   writeFileSync(join(dir, 'docker-compose.yml'), compose)
 }
 
-// Poll the builder container's /health endpoint until done:true or error or timeout
-async function waitForBuilderComplete(containerFullName, project, logName, timeoutMs = 600_000) {
-  const deadline = Date.now() + timeoutMs
-  let healthHost, healthPort
-
-  if (!config.domain && project?.port) {
-    healthHost = '127.0.0.1'
-    healthPort = project.port
-  } else {
-    for (let i = 0; i < 15; i++) {
-      const ip = await getContainerIpByFullName(containerFullName)
-      if (ip) { healthHost = ip; healthPort = 3000; break }
-      await new Promise(r => setTimeout(r, 2000))
-    }
-  }
-
-  if (!healthHost) {
-    log.error(`[${logName}] waitForBuilder: could not resolve container IP`)
-    return false
-  }
-
-  log.build(logName, `Waiting for builder at ${healthHost}:${healthPort}`)
-
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://${healthHost}:${healthPort}/health`, {
-        signal: AbortSignal.timeout(5000),
-      })
-      const data = await res.json()
-      if (data.done === true) {
-        log.build(logName, `Builder done — ${data.filesWritten} files written`)
-        return true
-      }
-      if (data.error) {
-        log.error(`[${logName}] Builder reported error: ${data.error}`)
-        return false
-      }
-    } catch { /* container still starting or generating */ }
-    await new Promise(r => setTimeout(r, 3000))
-  }
-
-  log.error(`[${logName}] waitForBuilder: timed out after ${timeoutMs / 1000}s`)
-  return false
-}
-
-// Start builder container, wait for it to finish writing files, clean up.
-// Returns true if generation succeeded, false if it failed/timed out (caller falls back to external generation).
+// Start the builder container (fire-and-forget).
+// The container handles generation → npm install → npm build → app launch internally.
+// Returns 'async' on success (caller skips Phase 3), false if container failed to start.
 async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus) {
   writeFileSync(join(dir, '.build-prompt.txt'), prompt)
   writeFileSync(join(dir, '.build-system-prompt.txt'), SYSTEM_PROMPT)
   writeFileSync(join(dir, 'builder-server.js'), BUILDER_SERVER_JS)
   writeFileSync(join(dir, 'Dockerfile'), BUILDER_DOCKERFILE)
+  // Minimal .dockerignore so the build context stays clean
+  writeFileSync(join(dir, '.dockerignore'), '.git\nnode_modules\n*.md\n.env\n')
   writeBuilderComposeFile(dir, userId, name)
 
   log.build(logName, 'Builder container: starting')
@@ -367,47 +255,15 @@ async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
     await dockerComposeUp(dir, null)
   } catch (err) {
     log.build(logName, `Builder container failed to start: ${err.message}`)
-    for (const f of ['builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt']) {
-      try { rmSync(join(dir, f)) } catch {}
-    }
     return false
   }
 
   const url = projectUrl(userId, name)
   log.build(logName, `Builder container live → ${url}`)
-  await onStatus(`🌐 Open now: ${url}\n🧠 AI working on your app live...`)
+  await onStatus(`🌐 Open now: ${url}\n🧠 AI is building your app live...`)
 
-  const containerFullName = userStore.containerName(userId, name)
-  const project = userStore.getProject(userId, name)
-  const builderDone = await waitForBuilderComplete(containerFullName, project, logName)
-
-  if (!builderDone) {
-    log.build(logName, 'Builder timed out — will fall back to external generation')
-    for (const f of ['builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt']) {
-      try { rmSync(join(dir, f)) } catch {}
-    }
-    return false
-  }
-
-  // If AI did not generate a new Dockerfile, remove the builder's so Phase 3 uses the fallback
-  const currentDockerfile = existsSync(join(dir, 'Dockerfile'))
-    ? readFileSync(join(dir, 'Dockerfile'), 'utf8').trim()
-    : ''
-  if (currentDockerfile === BUILDER_DOCKERFILE.trim()) {
-    log.build(logName, 'AI did not generate a Dockerfile — using generic fallback')
-    try { rmSync(join(dir, 'Dockerfile')) } catch {}
-  }
-
-  // Clean up builder artifacts
-  for (const f of ['builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt', '.build-complete', '.build-error']) {
-    try { rmSync(join(dir, f)) } catch {}
-  }
-
-  // Restore regular compose (no volume/env) for Phase 3
-  writeComposeFile(dir, userId, name)
-
-  log.build(logName, 'Builder container: done, compose restored for Phase 3')
-  return true
+  // The container self-manages: generation → install → launch. Nothing more to do here.
+  return 'async'
 }
 
 function buildClaudePrompt(name, description, errorContext = null, templateInfo = null) {
@@ -1034,7 +890,7 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
 
   // ── Template resolution ────────────────────────────────────────────────────
   let templateInfo = null
-  let templateStarted = false
+  let builderResult = false   // 'async' | false
 
   if (mode === 'new' || mode === 'full') {
     await onStatus('📦 Syncing templates...')
@@ -1054,10 +910,8 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
           userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
           log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
 
-          // ── Phase 1+2: builder container (new build with template) ────────
-          // Serves a live web console where the user can watch the AI editing files.
           const prompt = buildClaudePrompt(name, description, errorContext, templateInfo)
-          templateStarted = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
+          builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
         }
       } else {
         log.info(`[${logName}] no template matched, using generic build`)
@@ -1068,34 +922,36 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   }
 
   // ── Builder container for patch / full-rebuild / new without template ──────
-  // Extends the live web console to ALL edit modes, not just new+template builds.
-  if (!templateStarted && config.openrouterKey) {
+  if (!builderResult && config.openrouterKey) {
     let prompt
     if (mode === 'patch') {
       const existingFiles = getExistingFiles(dir)
       prompt = buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
     } else {
-      // new or full rebuild without a matched template
       prompt = buildClaudePrompt(name, description, errorContext, null)
     }
-    templateStarted = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
+    builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
   }
 
-  // Ensure compose file and external generation if builder was not used / failed
-  if (!templateStarted) {
-    writeComposeFile(dir, userId, name)
-    try {
-      await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
-      log.info(`[${logName}] code generated (external)`)
-    } catch (err) {
-      log.error(`[${logName}] code generation failed`, err.message)
-      throw new Error(`Code generation failed: ${err.message}`)
-    }
+  // ── Builder is self-managing: generation → install → launch inside container ─
+  // Return immediately. The user watches progress at the URL in their browser.
+  if (builderResult === 'async') {
+    const url = projectUrl(userId, name)
+    log.build(logName, `=== ASYNC DEPLOY === ${url}`)
+    return
   }
 
-  // ── Phase 3: rebuild with AI-generated code ───────────────────────────────
-  // For Node.js templates this is near-instant (just COPY new files + start).
-  // For Vite templates the vite build runs with the new source code (~30-60s).
+  // ── Fallback: external generation + docker rebuild ────────────────────────
+  // Only reached if builder container failed to start (Docker unavailable, etc.)
+  writeComposeFile(dir, userId, name)
+  try {
+    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
+    log.info(`[${logName}] code generated (external)`)
+  } catch (err) {
+    log.error(`[${logName}] code generation failed`, err.message)
+    throw new Error(`Code generation failed: ${err.message}`)
+  }
+
   if (!existsSync(join(dir, 'Dockerfile'))) {
     writeFileSync(join(dir, 'Dockerfile'), `# syntax=docker/dockerfile:1
 FROM node:20-alpine
@@ -1108,28 +964,21 @@ CMD ["npm", "start"]`)
     log.build(logName, 'Generated fallback Dockerfile')
   }
 
-  log.build(logName, 'Phase 3: rebuilding with generated code')
+  log.build(logName, 'Rebuilding with generated code...')
   await onStatus('🐳 Applying...')
-
-  const onDockerProgress = async (step) => { log.build(logName, `Docker: ${step}`) }
-
   try {
-    await dockerComposeUp(dir, onDockerProgress)
+    await dockerComposeUp(dir, async (step) => { log.build(logName, `Docker: ${step}`) })
     log.build(logName, 'Docker compose up OK')
-    log.info(`[${logName}] docker compose up OK`)
   } catch (err) {
     log.buildError(logName, 'Docker compose up failed', err.message)
-    log.error(`[${logName}] docker compose up failed`, err.message)
     throw err
   }
 
-  // ── Health check ──────────────────────────────────────────────────────────
   await onStatus('🔍 Verifying...')
 
   const containerFullName = userStore.containerName(userId, name)
   const project = userStore.getProject(userId, name)
   let healthHost, healthPort
-  log.info(`[${logName}] health check setup`, `domain=${config.domain || 'none'} project.port=${project?.port}`)
 
   if (!config.domain && project?.port) {
     healthHost = '127.0.0.1'
@@ -1141,31 +990,23 @@ CMD ["npm", "start"]`)
       if (ip) break
       await new Promise(r => setTimeout(r, 1000))
     }
-    log.info(`[${logName}] container IP: ${ip || 'null'}`)
     if (!ip) {
       const logs = await getContainerLogsByFullName(containerFullName)
-      log.error(`[${logName}] container has no IP`, logs)
       throw new Error(`Container failed to start.\n${logs.slice(-800)}`)
     }
     healthHost = ip
     healthPort = 3000
   }
 
-  log.info(`[${logName}] polling health at ${healthHost}:${healthPort}`)
-
-  const onHealthProgress = async (msg) => { log.build(logName, `Health: ${msg}`) }
-
-  const healthy = await pollHealth(healthHost, healthPort, 60_000, onHealthProgress)
+  const healthy = await pollHealth(healthHost, healthPort, 60_000,
+    async (msg) => { log.build(logName, `Health: ${msg}`) })
   if (!healthy) {
     const containerLogs = await getContainerLogsByFullName(containerFullName)
-    log.buildError(logName, 'Health check failed after 60s', containerLogs)
-    log.error(`[${logName}] health check failed after 60s`, containerLogs)
     throw new Error(`App not responding after 60s.\n${containerLogs.slice(-800)}`)
   }
 
   const url = projectUrl(userId, name)
   log.build(logName, `=== DEPLOY OK === ${url}`)
-  log.info(`[${logName}] deploy OK → ${url}`)
   await onStatus(`✅ Ready → ${url}`)
 }
 
