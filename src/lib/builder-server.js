@@ -97,6 +97,10 @@ async function runAll() {
     return fail('Cannot read prompt: ' + err.message)
   }
 
+  // Snapshot package.json before generation — used later to skip npm install if unchanged
+  let pkgJsonBefore = ''
+  try { pkgJsonBefore = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
+
   // ── 2. Call DeepSeek via OpenRouter ──────────────────────────────────────
   broadcast({ type: 'status', message: 'Calling DeepSeek...' })
   console.log('[builder] model:', MODEL)
@@ -161,13 +165,21 @@ async function runAll() {
     return fail(err.message)
   }
 
-  // ── 3. npm install ────────────────────────────────────────────────────────
+  // ── 3. npm install (skip if package.json unchanged — deps already in image) ─
   state = 'installing'
-  broadcast({ type: 'phase', phase: 'install', message: 'Installing dependencies...' })
-  try {
-    await spawnStreaming('npm', ['install'])
-  } catch (err) {
-    return fail('npm install failed: ' + err.message)
+  let pkgJsonAfter = ''
+  try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
+  const nodeModulesExists = fs.existsSync(path.join(WORKSPACE, 'node_modules'))
+  const depsChanged = pkgJsonBefore !== pkgJsonAfter || !nodeModulesExists
+  if (depsChanged) {
+    broadcast({ type: 'phase', phase: 'install', message: 'Installing dependencies...' })
+    try {
+      await spawnStreaming('npm', ['install'])
+    } catch (err) {
+      return fail('npm install failed: ' + err.message)
+    }
+  } else {
+    broadcast({ type: 'phase', phase: 'install', message: 'Dependencies up to date, skipping install...' })
   }
 
   // ── 4. npm run build (optional) ───────────────────────────────────────────
