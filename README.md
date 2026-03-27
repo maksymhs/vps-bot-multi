@@ -47,11 +47,27 @@
    │
    ▼
   real app spawned on :3001 — builder proxy forwards :3000 → :3001
-  Browser auto-reloads → real app is live ✓
+  Browser auto-reloads → updated app is live ✓
   Caddy → https://john-kanban.yourdomain.com ✓
 ```
 
 **The container never restarts.** builder-server.js stays alive as a permanent proxy. The app runs on an internal port.
+
+### Console-first UX
+
+For template-based builds the Telegram message links directly to `/console` so you see the agent working from the first second:
+
+```
+Telegram: 🚀 my-app  🖥 Watch build → https://my-app.domain.com/console
+
+open link → /console shows live agent progress
+                │
+                │  (for no-build templates: boilerplate already running at main URL)
+                │
+           build done → console auto-redirects → https://my-app.domain.com  ✓
+```
+
+Going back to `/console` later shows the full replay of the last build (SSE replay buffer).
 
 ### Live browser sync (zero interaction)
 
@@ -125,6 +141,8 @@ chmod 600 ~/.vpsbot
 - **Full lifecycle in one message** — ⏳ → 🚀 Watch Live → ✅ ready (single message edited in-place, no spam)
 - **Completion notification** — background poll on `/health`; edits to ✅ (or ❌) when build finishes
 - **Watch Live button** — opens the `/console` SSE stream directly from Telegram (on both new builds and rebuilds)
+- **Instant boilerplate** — for no-build templates (static, express) the app is live at the URL from second one while the agent customises in background
+- **Console-first links** — Telegram links directly to `/console`; browser auto-redirects to the app when done; `/console` replays full build history on revisit
 - **Auto browser sync** — injected watcher redirects open tab to console on rebuild, reloads app when done; zero clicks needed
 - **Docker layer caching** — `npm install` layer cached when `package.json` unchanged between builds
 - **npm install skip** — skipped entirely if `package.json` didn't change during generation
@@ -169,8 +187,9 @@ Each project runs in a single Docker container. `builder-server.js` is a **perma
 │                                                          │
 │  RUNNING PHASE                                           │
 │    :3000 proxies HTML → injects REBUILD_WATCHER script   │
-│      polls /health 2s → auto-redirect to console         │
-│      on rebuild; auto-reload to app when done            │
+│      polls /health 2s → auto-redirect to /console        │
+│      on rebuild; auto-reload to / when done              │
+│    no-build templates: boilerplate live before agent     │
 │    /rebuild POST → kills app, reruns build phase         │
 │    /console → SSE live log always available              │
 └─────────────────────────────────────────────────────────┘
