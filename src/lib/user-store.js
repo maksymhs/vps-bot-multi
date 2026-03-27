@@ -40,6 +40,9 @@ function makeSlug(info) {
 // ── Maintenance mode ────────────────────────────────────────────────────
 let _maintenanceMode = false
 
+// ── Last active project per user (conversational context) ───────────────
+const _lastProject = new Map()  // userId → projectName
+
 // ── Per-user project store ───────────────────────────────────────────────
 // Each user gets: {PROJECTS_DIR}/{slug}/projects.json
 
@@ -196,6 +199,12 @@ export const userStore = {
   projectDir(userId, projectName) {
     return join(userDir(String(userId)), projectName)
   },
+
+  // ── Active project context (in-memory, for conversational flow) ──
+  // Remembers the last project a user interacted with so plain text → rebuild
+  setLastProject(userId, name) { _lastProject.set(String(userId), name) },
+  getLastProject(userId) { return _lastProject.get(String(userId)) ?? null },
+  clearLastProject(userId) { _lastProject.delete(String(userId)) },
 
   // ── Maintenance mode ──
   get maintenanceMode() { return _maintenanceMode },

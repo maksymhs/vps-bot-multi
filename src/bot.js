@@ -105,6 +105,7 @@ bot.on('text', async (ctx, next) => {
       : input
 
     pendingRebuild.delete(ctx.chat.id)
+    userStore.setLastProject(userId, name)
 
     const slug = userStore.getUserSlug(userId)
     const buildKey = `${slug}-${name}`
@@ -124,6 +125,28 @@ bot.on('text', async (ctx, next) => {
       })
       .finally(() => buildingSet.delete(buildKey))
     return
+  }
+
+  // Conversational rebuild: plain text → patch last active project
+  // No need for menus — just type what you want changed
+  const lastProject = userStore.getLastProject(userId)
+  if (lastProject) {
+    const project = userStore.getProject(userId, lastProject)
+    if (project) {
+      const input = ctx.message.text.trim()
+      const description = `${project.description}\n\nRequested changes: ${input}`
+      const slug = userStore.getUserSlug(userId)
+      const buildKey = `${slug}-${lastProject}`
+      if (buildingSet.has(buildKey)) {
+        return ctx.reply(`⏳ *${lastProject}* is still building — wait a moment.`, { parse_mode: 'Markdown' })
+      }
+      buildingSet.add(buildKey)
+      const qs = getQueueStatus()
+      if (qs.waiting > 0) await ctx.reply(`⏳ *${lastProject}* — queued (${qs.waiting} ahead)`, { parse_mode: 'Markdown' })
+      enqueueBuild(buildKey, () => deployRebuild(ctx, lastProject, description, null, 'patch'))
+        .finally(() => buildingSet.delete(buildKey))
+      return
+    }
   }
 
   // New project flow
@@ -158,6 +181,7 @@ bot.on('text', async (ctx, next) => {
       await ctx.reply(`⏳ *${name}* — queued (${qs.waiting} builds ahead)`, { parse_mode: 'Markdown' })
     }
 
+    userStore.setLastProject(userId, name)
     enqueueBuild(buildKey, () => deployNew(ctx, name, description, null))
       .catch(err => {
         console.error('Deploy error:', err)
@@ -319,10 +343,12 @@ bot.action('admin_maint', async (ctx) => {
 // New project
 bot.action('new', async (ctx) => { await answer(ctx); await startNewFlow(ctx) })
 
-// Project menu
+// Project menu — opens project and sets it as active context
 bot.action(/^p:(.+)$/, async (ctx) => {
   await answer(ctx)
-  await showProject(ctx, ctx.match[1])
+  const name = ctx.match[1]
+  userStore.setLastProject(ctx.from.id, name)
+  await showProject(ctx, name)
 })
 
 // Rebuild — ask for changes first
@@ -439,6 +465,7 @@ bot.action(/^del_ok:(.+)$/, async (ctx) => {
 
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
     userStore.deleteProject(userId, name)
+    if (userStore.getLastProject(userId) === name) userStore.clearLastProject(userId)
     await showList(ctx)
   } catch (err) {
     await ctx.editMessageText(`❌ Error: ${err.message.slice(0, 300)}`)
