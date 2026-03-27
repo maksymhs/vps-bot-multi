@@ -600,8 +600,11 @@ async function runAgenticPatch(description, errorContext, attempt) {
 
   // Reset to 'building' so pollUntilReady doesn't mistake the pre-launched boilerplate
   // (state='running') for the finished customised app.
+  // Also clear the replay buffer so late-joining browsers don't see the old state:'running'
+  // event and reload-loop before the agent finishes.
   state = 'building'
   currentPhase = 'thinking'
+  if (!isRetry) sseBuffer.length = 0
 
   const statusMsg = isRetry
     ? 'Agent fixing errors (attempt ' + (attempt + 1) + ')...'
