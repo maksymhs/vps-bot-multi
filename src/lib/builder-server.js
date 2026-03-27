@@ -85,16 +85,25 @@ function fail(msg) {
   console.error('[builder] error:', msg)
 }
 
+const MAX_AUTOFIX = 1   // auto-patch retries on quick startup crash
+
 // ── Main pipeline: generate → install → build → launch ────────────────────
-async function runAll() {
+// errorContext: runtime error string from a previous crash (null on first run)
+// Returns: error string if app crashed quickly (caller should retry), else undefined
+async function runAll(errorContext) {
   // ── 1. Read prompts ───────────────────────────────────────────────────────
-  broadcast({ type: 'status', message: 'Reading build prompt...' })
+  broadcast({ type: 'status', message: errorContext ? 'AI is patching the error...' : 'Reading build prompt...' })
   let prompt, systemPrompt
   try {
     prompt       = fs.readFileSync(path.join(WORKSPACE, '.build-prompt.txt'), 'utf8')
     systemPrompt = fs.readFileSync(path.join(WORKSPACE, '.build-system-prompt.txt'), 'utf8')
   } catch (err) {
     return fail('Cannot read prompt: ' + err.message)
+  }
+
+  // Append runtime error context so DeepSeek knows what to fix
+  if (errorContext) {
+    prompt += '\n\n--- STARTUP ERROR TO FIX ---\n' + errorContext.slice(0, 1500) + '\n--- END ERROR ---'
   }
 
   // Snapshot package.json before generation — used later to skip npm install if unchanged
@@ -206,17 +215,31 @@ async function runAll() {
   broadcast({ type: 'launching', message: 'Launching app...' })
   console.log('[builder] launching:', startBin, startArgs.join(' '))
 
-  server.close(function() {
-    setTimeout(function() {
-      const app = cp.spawn(startBin, startArgs, {
-        cwd:      WORKSPACE,
-        stdio:    'inherit',
-        detached: false,
-      })
-      app.on('exit',  function(code) { process.exit(code || 0) })
-      app.on('error', function(err)  { console.error('[app]', err.message); process.exit(1) })
-    }, 300)
+  // Returns error string if app crashes within CRASH_WINDOW_MS, else process.exit()
+  const CRASH_WINDOW_MS = 6000
+  const crashError = await new Promise(function(resolve) {
+    server.close(function() {
+      setTimeout(function() {
+        let errorOutput = ''
+        const startedAt = Date.now()
+        const app = cp.spawn(startBin, startArgs, {
+          cwd:      WORKSPACE,
+          stdio:    ['ignore', 'pipe', 'pipe'],
+          detached: false,
+        })
+        app.stdout.on('data', function(d) { process.stdout.write(d); errorOutput += d.toString() })
+        app.stderr.on('data', function(d) { process.stderr.write(d); errorOutput += d.toString() })
+        app.on('error', function(err) { resolve(err.message) })
+        app.on('exit',  function(code) {
+          const quickCrash = code !== 0 && (Date.now() - startedAt) < CRASH_WINDOW_MS
+          if (quickCrash) resolve(errorOutput.slice(-1500))
+          else process.exit(code || 0)
+        })
+      }, 300)
+    })
   })
+
+  return crashError   // signals caller to retry with this error as context
 }
 
 // ── Web console HTML ───────────────────────────────────────────────────────
@@ -428,7 +451,25 @@ const server = http.createServer(function(req, res) {
   res.end(HTML)
 })
 
+async function runWithAutofix() {
+  let errorContext = null
+  for (let attempt = 1; attempt <= 1 + MAX_AUTOFIX; attempt++) {
+    if (attempt > 1) {
+      console.log('[builder] auto-fix attempt', attempt)
+      await new Promise(r => setTimeout(r, 600))        // wait for port to free
+      await new Promise(r => server.listen(PORT, r))    // reopen builder console
+      state = 'building'; buildError = null; filesWritten = 0
+      broadcast({ type: 'phase', phase: 'fixing', message: 'App crashed — AI is patching...' })
+    }
+    errorContext = await runAll(errorContext)
+    if (!errorContext) break                             // stable exit handled inside runAll
+  }
+  if (errorContext) {
+    fail('App failed to start after auto-fix:\n' + errorContext.slice(-600))
+  }
+}
+
 server.listen(PORT, function() {
   console.log('[builder] server on :' + PORT + '  project=' + PROJECT)
-  setTimeout(runAll, 800)
+  setTimeout(runWithAutofix, 800)
 })
