@@ -242,11 +242,23 @@ networks:
 // The container handles generation → npm install → npm build → app launch internally.
 // Returns 'async' on success (caller skips Phase 3), false if container failed to start.
 async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus) {
+  // ── Sync latest files from running container → host dir ──────────────────
+  // On patch/rebuild, the AI previously modified files inside the container.
+  // The host dir may have stale template files. Sync before the new build so
+  // the AI sees the current state and the build context is up to date.
+  const containerName = userStore.containerName(userId, name)
+  try {
+    execSync(`docker cp "${containerName}:/app/." "${dir}/"`, { stdio: 'pipe' })
+    log.build(logName, 'Synced files from running container to host')
+  } catch {
+    // Container not running yet (first build) — files already in dir from template copy
+  }
+
+  // Write builder artifacts (overwrite whatever was synced)
   writeFileSync(join(dir, '.build-prompt.txt'), prompt)
   writeFileSync(join(dir, '.build-system-prompt.txt'), SYSTEM_PROMPT)
   writeFileSync(join(dir, 'builder-server.js'), BUILDER_SERVER_JS)
   writeFileSync(join(dir, 'Dockerfile'), BUILDER_DOCKERFILE)
-  // Minimal .dockerignore so the build context stays clean
   writeFileSync(join(dir, '.dockerignore'), '.git\nnode_modules\n*.md\n.env\n')
   writeBuilderComposeFile(dir, userId, name)
 
@@ -473,12 +485,19 @@ app.listen(process.env.PORT || 3000)
   }
 }
 
+const BUILDER_ARTIFACTS = new Set([
+  'builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt',
+  '.build-error', 'docker-compose.yml', 'Dockerfile', '.dockerignore',
+])
+
 function getExistingFiles(dir) {
   try {
     const entries = execSync(`find ${JSON.stringify(dir)} -type f -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null || true`, {
       stdio: ['pipe', 'pipe', 'pipe'],
     }).toString().trim().split('\n').filter(Boolean)
-    return entries.map(e => e.replace(dir + '/', '')).filter(f => f && !f.startsWith('.git/'))
+    return entries
+      .map(e => e.replace(dir + '/', ''))
+      .filter(f => f && !f.startsWith('.git/') && !BUILDER_ARTIFACTS.has(f))
   } catch {
     return []
   }
