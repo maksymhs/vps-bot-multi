@@ -19,7 +19,8 @@
   User on Telegram: "A kanban board with drag and drop"
    │
    ▼
-  Bot sends ⏳ loading message, matches template → copies boilerplate to project dir
+  Bot sends ⏳ loading message
+  Built-in Next.js 14 + React + Tailwind scaffold written to project dir
    │
    ▼
   Docker builds image (npm install layer cached) → container starts
@@ -29,21 +30,17 @@
     ├── serves live web console + SSE log stream
     ├── reads .build-config.json → picks mode (patch | generate)
     │
-    ├── [template match — mode: patch]
-    │   ├── FAST PATH: plan+execute (1 API call)
-    │   │     all files loaded into context → DeepSeek returns JSON plan
-    │   │     { edits: [{file,old,new}], creates: [{file,content}] }
-    │   │     → apply all changes instantly, no more API calls
-    │   │
-    │   └── FALLBACK: agentic tool loop (if plan fails)
-    │         list_files → read_file → edit_file / write_file (up to 14 iters)
-    │
-    └── [no template — mode: generate]
-        └── calls DeepSeek V3 via OpenRouter (streaming)
-            writes files as tokens arrive
+    └── [boilerplate on disk — mode: patch]
+        ├── FAST PATH: plan+execute (1 API call)
+        │     all files loaded into context → DeepSeek returns JSON plan
+        │     { edits: [{file,old,new}], creates: [{file,content}] }
+        │     → apply all changes instantly, no more API calls
+        │
+        └── FALLBACK: agentic tool loop (if plan fails)
+              list_files → read_file → edit_file / write_file (up to 14 iters)
    │
    ▼
-  npm install (skipped if package.json unchanged) → npm run build (if needed)
+  npm install (skipped if package.json unchanged) → next dev starts
    │
    ▼
   real app spawned on :3001 — builder proxy forwards :3000 → :3001
@@ -131,6 +128,7 @@ chmod 600 ~/.vpsbot
 
 ## Features
 
+- **Next.js + React + Tailwind** — every project starts from a built-in Next.js 14 App Router scaffold; only visual web apps
 - **Live build console** — animated spinner per tool call, watch the AI edit your app in real time (SSE stream)
 - **Plan+Execute** — single API call with all files in context → JSON plan → all edits applied instantly (~5-10s vs 20-60s)
 - **Agentic tool loop** — fallback if plan fails: `read_file` / `edit_file` / `write_file` tools, can't hallucinate file contents
@@ -138,13 +136,12 @@ chmod 600 ~/.vpsbot
 - **Permanent proxy architecture** — builder-server.js stays alive on :3000 forever; app runs on :3001 internally
 - **Instant HTTP rebuild** — `/rebuild` POST to the running container, no Docker restart whatsoever
 - **Conversational changes** — just type what you want changed; no menus needed after first deploy
+- **Blocked during build** — second change is rejected with a friendly "please wait" while a build is in progress; no racing
 - **Live progress bar** — Telegram message updates in-place as build moves through phases (`thinking → editing → installing → building → launching`)
-- **Change queue** — send the next change before the current build finishes; applied automatically when ready
 - **Compact completion message** — shows what was applied, no URL spam, just type the next change
 - **Full lifecycle in one message** — ⏳ → progress bar → ✅ (single message edited in-place, no spam)
 - **Watch Live button** — opens the `/console` SSE stream directly from Telegram
 - **Overlay build panel** — slide-up panel in the browser shows live build progress without navigating away
-- **Instant boilerplate** — for no-build templates (static, express) the app is live at the URL from second one while the agent customises in background
 - **Console-first links** — Telegram links directly to `/console`; browser auto-redirects to the app when done; `/console` replays full build history on revisit
 - **Auto browser sync** — injected watcher shows overlay on rebuild, reloads app when done; zero clicks needed
 - **Docker layer caching** — `npm install` layer cached when `package.json` unchanged between builds
@@ -155,7 +152,6 @@ chmod 600 ~/.vpsbot
 - **Configurable limits** — `MAX_APPS_PER_USER` in `.env` (default: 3)
 - **Auto-sleep** — idle containers stop after 30 min, wake on HTTP request
 - **Admin panel** — server status, user list, ban/unban, maintenance mode
-- **Template matching** — boilerplate copied before AI runs; AI only outputs changed files
 - **Build queue** — `MAX_CONCURRENT_BUILDS` prevents server overload
 - **Full build logs** — container output streamed to `logs/build-*.log` automatically
 
@@ -272,17 +268,17 @@ Bot:  🔨 "now make the font bigger" — applying to my-kanban...
 
 No URL repeated on every change. No menu between changes. Just a natural conversation.
 
-### Change queuing
+### While building — blocked, not queued
 
-Send the next change before the current build finishes — it queues automatically:
+Changes sent while a build is in progress are blocked with a friendly message. Wait for the ✅ completion, then type the next change.
 
 ```
 You:  change button color          ← build starts
-You:  also round the corners       ← build still running
-Bot:  📝 my-kanban is building — change queued (1 pending).
-      Will apply automatically when done.
-                                   ← first build completes → ✅
-                                   ← second change fires automatically
+      🔨 "change button color" — applying...
+      ▓▓▓░░░░░░░ Agent thinking...
+You:  also round the corners       ← blocked while building
+Bot:  ⏳ my-kanban is still building — please wait.
+      ← build completes → ✅ → then type freely
 ```
 
 ### Live progress bar
@@ -318,19 +314,23 @@ The Telegram message updates in-place as the build advances through phases:
 
 ---
 
-## Templates
+## Universal Template
 
-When a user description matches a known template, the boilerplate is deployed first and the AI customizes it using the agentic tool loop — much faster and more consistent than generating everything from scratch.
+Every project starts from the same built-in **Next.js 14 + React 18 + Tailwind CSS** scaffold (`src/lib/next-template.js`). No external template repo, no matching logic — the boilerplate is written to disk before the AI runs, so the AI only outputs files that differ from it.
 
-| Template | Stack |
-|---|---|
-| `react-vite` | React + Vite |
-| `static-site` | HTML + Tailwind CDN |
-| `landing-page` | HTML + Tailwind CDN |
-| `express-api` | Express + Node.js |
-| `threejs-3d` | Three.js + React Three Fiber |
+```
+app/
+├── layout.jsx          ← root layout with globals.css
+├── page.jsx            ← home page (overwritten by AI)
+├── globals.css         ← @tailwind directives
+└── api/health/route.js ← GET /health → { status: 'ok' }
+package.json            ← next 14 + react 18 + tailwindcss
+next.config.mjs
+tailwind.config.js
+postcss.config.js
+```
 
-Templates live in a separate repo (`vps-bot-templates`) and are synced to the server on startup.
+The AI receives the file list and is told to output **only what changes**. New components go in `app/` or `components/`. The health route is never touched.
 
 ---
 
@@ -455,7 +455,7 @@ vps-bot-multi/
 │       ├── build-state.js      # Build + poll tracking (buildingSet, pollingSet)
 │       ├── build-queue.js      # Concurrency limiter
 │       ├── logger.js           # Centralized file logging
-│       ├── templates.js        # Template sync, matching & boilerplate
+│       ├── next-template.js    # Built-in Next.js 14 + React + Tailwind scaffold
 │       └── caddy.js            # Caddy admin API
 ├── logs/
 ├── .env.example

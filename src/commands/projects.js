@@ -7,7 +7,7 @@ import { buildingSet, pollingSet } from '../lib/build-state.js'
 import { config } from '../lib/config.js'
 import { userStore } from '../lib/user-store.js'
 import { log } from '../lib/logger.js'
-import { syncTemplates, matchTemplate, resolveAndCopy } from '../lib/templates.js'
+import { copyNextTemplate, buildNextPrompt } from '../lib/next-template.js'
 import { enqueueBuild, getQueuePosition } from '../lib/build-queue.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -1007,40 +1007,21 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   const logName = `${slug}-${name}`
   log.info(`[${logName}] build start`, `dir=${dir} mode=${mode}`)
 
-  // ── Template resolution ────────────────────────────────────────────────────
-  let templateInfo = null
+  // ── Template scaffold (Next.js 14 + React + Tailwind) ─────────────────────
   let builderResult = false   // 'async' | false
 
   if (mode === 'new' || mode === 'full') {
-    await onStatus('📦 Syncing templates...')
-    const synced = syncTemplates()
-    if (synced) {
-      const match = matchTemplate(description)
-      if (match) {
-        const label = match.stack
-          ? `stack: ${match.stack.displayName || match.stack.name}`
-          : `template: ${match.template.displayName}`
-        log.info(`[${logName}] matched ${label} (score=${match.score})`)
-        await onStatus(`📋 Using ${label}`)
+    await onStatus('📦 Preparing Next.js template...')
+    const boilerplateFiles = copyNextTemplate(dir)
+    try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
+    userStore.setProject(userId, name, { template: 'next-react' })
+    log.info(`[${logName}] next-react boilerplate written: ${boilerplateFiles.length} files`)
 
-        templateInfo = resolveAndCopy(match, dir)
-        if (templateInfo) {
-          try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
-          userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
-          log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
-
-          // Template is already deployed — use agentic agent to customize surgically
-          builderResult = await runBuilderContainer(dir, userId, name, description, logName, onStatus, { mode: 'patch' })
-        }
-      } else {
-        log.info(`[${logName}] no template matched, using generic build`)
-      }
-    } else {
-      log.info(`[${logName}] templates sync failed, using generic build`)
-    }
+    const prompt = buildNextPrompt(name, description, boilerplateFiles, errorContext)
+    builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus, { mode: 'patch', maxTokens: 8000 })
   }
 
-  // ── Builder container for patch / full-rebuild / new without template ──────
+  // ── Builder container for patch mode ───────────────────────────────────────
   if (!builderResult && config.openrouterKey) {
     if (mode === 'patch') {
       // Try fast HTTP rebuild first (no Docker, no container restart)
@@ -1057,9 +1038,6 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
         const prompt = buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
         builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
       }
-    } else {
-      const prompt = buildClaudePrompt(name, description, errorContext, null)
-      builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
     }
   }
 
@@ -1075,7 +1053,7 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   // Only reached if builder container failed to start (Docker unavailable, etc.)
   writeComposeFile(dir, userId, name)
   try {
-    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
+    await generateCode(dir, name, description, onStatus, errorContext, null, mode, null)
     log.info(`[${logName}] code generated (external)`)
   } catch (err) {
     log.error(`[${logName}] code generation failed`, err.message)
