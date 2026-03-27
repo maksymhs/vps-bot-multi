@@ -825,6 +825,7 @@ function proxyToApp(req, res) {
           : body + REBUILD_WATCHER
         const outHeaders = Object.assign({}, proxyRes.headers)
         delete outHeaders['content-length']   // length changed after injection
+        outHeaders['cache-control'] = 'no-store'   // always fetch fresh after rebuild
         res.writeHead(proxyRes.statusCode, outHeaders)
         res.end(body)
       })
@@ -987,7 +988,7 @@ function onChunk(text) {
 
 function pollAndReload() {
   fetch('/health').then(function(r) { return r.json() }).then(function(d) {
-    if (!d.loading) setTimeout(function() { window.location.href = '/' }, 1000)
+    if (!d.loading) setTimeout(function() { window.location.replace('/?_=' + Date.now()) }, 1000)
     else setTimeout(pollAndReload, 2000)
   }).catch(function() {
     setTimeout(pollAndReload, 2000)
