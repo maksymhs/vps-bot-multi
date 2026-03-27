@@ -324,46 +324,60 @@ async function runWithAutofix() {
 }
 
 // ── In-container rebuild triggered via HTTP ──────────────────────────────────
+const PATCH_SKIP_CONTENT = new Set(['package-lock.json', 'yarn.lock', '.env'])
+const PATCH_MAX_FILE_CHARS = 6000
+
 async function startRebuild(description) {
   console.log('[builder] HTTP rebuild triggered:', description)
 
-  // Kill running app
+  // Kill running app (only the app process, container keeps running)
   if (currentApp) {
     currentApp.kill('SIGTERM')
     currentApp = null
   }
 
-  // Build patch prompt from current workspace files
+  // Read actual file contents so AI sees what exists and makes minimal changes
   const files = getWorkspaceFiles()
-  const fileList = files.map(f => '  - ' + f).join('\n')
-  let systemPrompt = ''
-  try { systemPrompt = fs.readFileSync(path.join(WORKSPACE, '.build-system-prompt.txt'), 'utf8') } catch {}
+  let fileContext = ''
+  for (const f of files) {
+    if (PATCH_SKIP_CONTENT.has(path.basename(f))) continue
+    try {
+      const content = fs.readFileSync(path.join(WORKSPACE, f), 'utf8')
+      if (content.length <= PATCH_MAX_FILE_CHARS) {
+        fileContext += '\n--- FILE: ' + f + ' ---\n' + content + '\n--- END FILE ---\n'
+      } else {
+        fileContext += '\n[' + f + '] (' + content.length + ' chars — too large to show, keep unchanged unless needed)\n'
+      }
+    } catch {}
+  }
 
   const prompt =
     'Modify the existing application "' + PROJECT + '".\n\n' +
     'REQUESTED CHANGES:\n' + description + '\n\n' +
-    'EXISTING FILES IN /app:\n' + fileList + '\n\n' +
-    'RULES:\n' +
-    '1. Output ONLY files that need to change for this request\n' +
-    '2. Keep GET /health → { status: "ok" }\n' +
-    '3. Keep the existing file structure\n' +
-    '4. App MUST use process.env.PORT || 3000 (it will be set to 3001 internally)\n' +
-    '5. ASCII only. No explanations outside code.'
+    'CURRENT FILE CONTENTS:\n' + fileContext + '\n\n' +
+    'RULES — follow strictly:\n' +
+    '1. Output ONLY files that need to change. If a file is fine, do NOT output it.\n' +
+    '2. Make MINIMAL changes — edit only the lines required by the request.\n' +
+    '3. Preserve all existing structure, logic, styles and routes not mentioned in the request.\n' +
+    '4. Keep GET /health → { status: "ok" } working.\n' +
+    '5. App MUST use process.env.PORT || 3000 for the listen port.\n' +
+    '6. ASCII only. No explanations outside code blocks.'
 
   fs.writeFileSync(path.join(WORKSPACE, '.build-prompt.txt'), prompt)
-  if (systemPrompt) {
-    // Reduce max tokens for patch operations
-    try {
-      const cfg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, '.build-config.json'), 'utf8'))
-      cfg.maxTokens = 6000
-      fs.writeFileSync(path.join(WORKSPACE, '.build-config.json'), JSON.stringify(cfg))
-    } catch {}
+
+  // Reduce max tokens for patch — only a few files should change
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, '.build-config.json'), 'utf8'))
+    cfg.maxTokens = 5000
+    fs.writeFileSync(path.join(WORKSPACE, '.build-config.json'), JSON.stringify(cfg))
+  } catch {
+    fs.writeFileSync(path.join(WORKSPACE, '.build-config.json'), JSON.stringify({ maxTokens: 5000 }))
   }
 
   state = 'building'
   buildError = null
   filesWritten = 0
-  broadcast({ type: 'phase', phase: 'rebuilding', message: 'Rebuilding with AI...' })
+  broadcast({ type: 'phase', phase: 'rebuilding', message: 'Patching with AI...' })
 
   runWithAutofix()
 }

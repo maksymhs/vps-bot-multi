@@ -1166,16 +1166,30 @@ async function deployWithRetry(ctx, dir, userId, name, description, action, mode
   return false
 }
 
-async function sendProjectMessage(ctx, name, result, loadingMsg = null) {
+async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = 'new') {
   const { Markup } = await import('telegraf')
   const url = projectUrl(getUserId(ctx), name)
-  const text = result === 'async'
-    ? `🚀 *${name}*\n🌐 ${url}\n\n_Open the link — your app is building live inside the container._`
-    : `✅ *${name}* is ready\n🔗 ${url}`
-  const keyboard = Markup.inlineKeyboard([
+
+  let text, keyboard
+  const baseButtons = [
     [Markup.button.callback('♻️ Rebuild', `rb:${name}`), Markup.button.callback('📋 Logs', `lg:${name}`)],
     [Markup.button.callback('🔗 URL', `url:${name}`), Markup.button.callback('⬅️ List', 'list')],
-  ])
+  ]
+
+  if (result === 'async' && mode === 'patch') {
+    text = `🔨 *${name}* is being patched\n🌐 ${url}\n\n_Watch the changes live — tap the button below._`
+    keyboard = Markup.inlineKeyboard([
+      [Markup.button.url('👁 Watch Live', url + '/console')],
+      ...baseButtons,
+    ])
+  } else if (result === 'async') {
+    text = `🚀 *${name}*\n🌐 ${url}\n\n_Open the link — your app is building live inside the container._`
+    keyboard = Markup.inlineKeyboard(baseButtons)
+  } else {
+    text = `✅ *${name}* is ready\n🔗 ${url}`
+    keyboard = Markup.inlineKeyboard(baseButtons)
+  }
+
   if (loadingMsg) {
     await ctx.telegram.editMessageText(
       loadingMsg.chat.id, loadingMsg.message_id, null,
@@ -1221,7 +1235,7 @@ export async function deployRebuild(ctx, name, description, model = null, mode =
   const result = await deployWithRetry(ctx, dir, userId, name, description, 'rebuild', model, mode)
   if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
-    await sendProjectMessage(ctx, name, result, loadingMsg)
+    await sendProjectMessage(ctx, name, result, loadingMsg, mode)
   } else if (loadingMsg) {
     await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {})
   }
