@@ -1,12 +1,10 @@
 // builder-server.js — runs INSIDE the Docker container
 // Flow: serve web console → call DeepSeek → write files → npm install → npm build → spawn app
 // Uses only Node.js built-ins + global fetch (Node 18+). No external deps.
-'use strict'
-
-const http = require('http')
-const fs   = require('fs')
-const path = require('path')
-const cp   = require('child_process')
+import http from 'http'
+import fs   from 'fs'
+import path from 'path'
+import cp   from 'child_process'
 
 const WORKSPACE = process.env.WORKSPACE_DIR || '/app'
 const PORT      = 3000
