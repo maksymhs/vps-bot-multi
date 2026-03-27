@@ -994,9 +994,23 @@ function pollAndReload() {
   })
 }
 
+// replaying = true while the server is sending the buffered history to this client.
+// We never auto-redirect during replay — only on live events — so visiting /console
+// manually after a build shows the history without immediately bouncing to /.
+var replaying = true
+
 var es = new EventSource('/events')
 es.onmessage = function(e) {
   var d = JSON.parse(e.data)
+
+  // 'connected' is always sent AFTER the replay buffer — marks end of replay.
+  if (d.type === 'connected') {
+    replaying = false
+    // If build already finished before we connected, update phase label
+    if (d.state === 'running') { phEl.textContent = 'running'; fb.className = 'footbar launch'; fbL.textContent = 'App is live!' }
+    if (d.state === 'error')   { phEl.textContent = 'error';   fb.className = 'footbar err' }
+    return
+  }
 
   if (d.type === 'thinking') {
     setLive('Agent thinking...')
@@ -1045,8 +1059,7 @@ es.onmessage = function(e) {
     phEl.textContent = 'running'
     fb.className = 'footbar launch'
     fbL.textContent = 'App is live!'
-    es.close()
-    setTimeout(pollAndReload, 1000)
+    if (!replaying) { es.close(); setTimeout(pollAndReload, 1000) }
 
   } else if (d.type === 'launching') {
     appendLine('')
@@ -1054,8 +1067,7 @@ es.onmessage = function(e) {
     phEl.textContent = 'launching'
     fb.className = 'footbar launch'
     fbL.textContent = 'App is starting...'
-    es.close()
-    setTimeout(pollAndReload, 1500)
+    if (!replaying) { es.close(); setTimeout(pollAndReload, 1500) }
 
   } else if (d.type === 'error') {
     if (partialEl) { partialEl.remove(); partialEl = null }
