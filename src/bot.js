@@ -207,9 +207,18 @@ function answer(ctx) {
   return ctx.answerCbQuery().catch(() => {})
 }
 
-// Navigation
-bot.action('main', async (ctx) => { await answer(ctx); await showMain(ctx, true) })
-bot.action('list', async (ctx) => { await answer(ctx); await showList(ctx) })
+// Navigation — clear conversational context so typing after going to menu
+// doesn't accidentally patch the previously active project.
+bot.action('main', async (ctx) => {
+  await answer(ctx)
+  userStore.clearLastProject(ctx.from?.id)
+  await showMain(ctx, true)
+})
+bot.action('list', async (ctx) => {
+  await answer(ctx)
+  userStore.clearLastProject(ctx.from?.id)
+  await showList(ctx)
+})
 
 // Admin: server status (admin only)
 bot.action('status', async (ctx) => {

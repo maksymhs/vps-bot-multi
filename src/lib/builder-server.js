@@ -865,7 +865,7 @@ function watch(){
       endLive(null,true)
       log('── '+d.message,'#3fb950')
       ES.close()
-      setTimeout(function(){hide();window.location.replace('/?_='+Date.now())},1200)
+      setTimeout(function(){hide();window.location.reload()},1200)
     }
     else if(d.type==='error'){endLive('✗ '+d.message,false)}
   }
@@ -1073,7 +1073,7 @@ function onChunk(text) {
 
 function pollAndReload() {
   fetch('/health').then(function(r) { return r.json() }).then(function(d) {
-    if (!d.loading) setTimeout(function() { window.location.replace('/?_=' + Date.now()) }, 1000)
+    if (!d.loading) setTimeout(function() { window.location.reload() }, 1000)
     else setTimeout(pollAndReload, 2000)
   }).catch(function() {
     setTimeout(pollAndReload, 2000)
