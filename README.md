@@ -241,20 +241,41 @@ App is building live — tap Watch Live to follow progress.
 [♻️ Rebuild]  [📋 Logs]  [🔗 URL]  [⬅️ List]
 ```
 
-**After rebuild:**
+**After rebuild (with progress bar):**
 ```
 ⏳ my-kanban
    Rebuilding...
         ↓
-🔨 my-kanban is being patched
-Watch the changes live — tap the button below.
+⏳ my-kanban
+Rebuilding...
+
+▓▓░░░░░░░░ Agent thinking...
+[👁 Watch Live]
+        ↓
+⏳ my-kanban
+Rebuilding...
+
+▓▓▓▓░░░░░░ Applying changes...
 [👁 Watch Live]
         ↓
 ✅ my-kanban is ready
+🔗 https://my-kanban.yourdomain.com
+Applied: "change the button color"
+
+Type your next change directly in the chat.
+[🔗 Open]  [♻️ Rebuild]  [📋 Logs]  [⬅️ List]
 ```
 
-The ✅ notification is sent by a background poll on the container's `/health` endpoint.
-Watch Live opens the `/console` SSE stream so you can follow every tool call in real time.
+The progress bar updates live as the build moves through phases: `thinking → editing → installing → building → launching`.
+Each phase change edits the message in-place — no spam.
+
+**Change queuing:**
+If you send another change while a build is in progress, it's queued automatically:
+```
+📝 my-kanban is building — change queued (1 pending).
+Will apply automatically when done.
+```
+As soon as the current build finishes, the queued change starts immediately.
 
 > **Tip:** keep the app open in a browser tab. When you send any change from Telegram the tab switches to the live console automatically and reloads to the updated app when done — no manual refresh ever needed.
 

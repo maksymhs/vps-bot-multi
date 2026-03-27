@@ -30,6 +30,7 @@ let state        = 'building'  // 'building' | 'installing' | 'running' | 'error
 let buildError   = null
 let filesWritten = 0
 let currentApp   = null        // child process for the running app
+let currentPhase = 'starting'  // fine-grained phase exposed via /health for Telegram progress bar
 const sseClients = []
 const sseBuffer  = []       // replay buffer — late-joining clients get full history
 const SSE_BUF_MAX = 300
@@ -114,6 +115,7 @@ function spawnApp(bin, args) {
       detached: false,
     })
     state = 'running'
+    currentPhase = 'running'
 
     currentApp.stdout.on('data', function(d) { process.stdout.write(d); errorOutput += d.toString() })
     currentApp.stderr.on('data', function(d) { process.stderr.write(d); errorOutput += d.toString() })
@@ -172,6 +174,7 @@ async function runAll(errorContext) {
   filesWritten = 0
   currentFile  = null
   contentLines = []
+  currentPhase = 'starting'
   sseBuffer.length = 0   // clear replay buffer so new clients don't see previous build
 
   // ── 1. Read prompts ─────────────────────────────────────────────────────────
@@ -201,6 +204,7 @@ async function runAll(errorContext) {
     if (cfg.maxTokens) maxTokens = cfg.maxTokens
   } catch {}
 
+  currentPhase = 'thinking'
   broadcast({ type: 'status', message: 'Calling DeepSeek...' })
   console.log('[builder] model:', MODEL, 'max_tokens:', maxTokens)
   try {
@@ -268,6 +272,7 @@ async function runAll(errorContext) {
 
   // ── 3. npm install (skip if package.json unchanged — deps already in image) ──
   state = 'installing'
+  currentPhase = 'installing'
   let pkgJsonAfter = ''
   try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
   const nodeModulesExists = fs.existsSync(path.join(WORKSPACE, 'node_modules'))
@@ -288,6 +293,7 @@ async function runAll(errorContext) {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
     if (pkg.scripts && pkg.scripts.build) {
+      currentPhase = 'building'
       broadcast({ type: 'phase', phase: 'build', message: 'Building...' })
       await spawnStreaming('npm', ['run', 'build'])
     }
@@ -305,6 +311,7 @@ async function runAll(errorContext) {
   } catch {}
 
   // ── 6. Launch app on APP_PORT (builder stays alive as proxy on PORT) ─────────
+  currentPhase = 'launching'
   broadcast({ type: 'launching', message: 'Launching app...' })
   console.log('[builder] launching:', startBin, startArgs.join(' '), 'on port', APP_PORT)
 
@@ -489,6 +496,7 @@ async function tryPlanExecute(description, errorContext) {
     : 'Task: ')
     + description + '\n\n=== PROJECT FILES ===\n' + ctxStr
 
+  currentPhase = 'thinking'
   broadcast({ type: 'thinking' })
 
   // Heartbeat: keep broadcasting 'thinking' every 4s so browsers that connect mid-call
@@ -524,6 +532,7 @@ async function tryPlanExecute(description, errorContext) {
   const creates = plan.creates || []
   if (edits.length === 0 && creates.length === 0) { console.log('[plan] no changes'); return false }
 
+  currentPhase = 'editing'
   let allOk = true
 
   for (const edit of edits) {
@@ -600,6 +609,7 @@ async function runAgenticPatch(description, errorContext, attempt) {
   }
 
   for (let iter = 0; !skipToolLoop && iter < AGENT_MAX_ITERS; iter++) {
+    currentPhase = 'thinking'
     broadcast({ type: 'thinking' })
     let response
     const iterHb = setInterval(function() { broadcast({ type: 'thinking' }) }, 4000)
@@ -643,6 +653,7 @@ async function runAgenticPatch(description, errorContext, attempt) {
     }
 
     // Execute tool calls
+    currentPhase = 'editing'
     for (const call of response.tool_calls) {
       let args = {}
       try { args = JSON.parse(call.function.arguments) } catch {}
@@ -721,6 +732,7 @@ async function runAgenticPatch(description, errorContext, attempt) {
 
   // ── npm install if package.json changed ────────────────────────────────────
   state = 'installing'
+  currentPhase = 'installing'
   let pkgJsonAfter = ''
   try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
   if (pkgJsonBefore !== pkgJsonAfter || !fs.existsSync(path.join(WORKSPACE, 'node_modules'))) {
@@ -740,6 +752,7 @@ async function runAgenticPatch(description, errorContext, attempt) {
     startBin  = pkg.scripts?.start ? pkg.scripts.start.trim().split(/\s+/)[0] : 'node'
     startArgs = pkg.scripts?.start ? pkg.scripts.start.trim().split(/\s+/).slice(1) : ['src/index.js']
     if (pkg.scripts?.build) {
+      currentPhase = 'building'
       broadcast({ type: 'phase', phase: 'build', message: isRetry ? 'Rebuilding after fix...' : 'Building...' })
       try {
         await spawnStreaming('npm', ['run', 'build'], true)
@@ -762,6 +775,7 @@ async function runAgenticPatch(description, errorContext, attempt) {
     currentApp = null
     await new Promise(function(r) { setTimeout(r, 600) })
   }
+  currentPhase = 'launching'
   broadcast({ type: 'launching', message: isRetry ? 'Relaunching after fix...' : 'Launching app...' })
   const crashError = await spawnApp(startBin, startArgs)
   if (crashError) {
@@ -783,6 +797,7 @@ async function startRebuild(description) {
   state = 'building'
   buildError = null
   filesWritten = 0
+  currentPhase = 'thinking'
   sseBuffer.length = 0   // clear replay buffer — rebuild starts fresh
   broadcast({ type: 'phase', phase: 'rebuilding', message: 'Agent is reading the codebase...' })
 
@@ -1167,6 +1182,7 @@ const server = http.createServer(function(req, res) {
       status:  buildError ? 'error' : 'ok',
       loading: state !== 'running' && state !== 'error',
       state,
+      phase:   currentPhase,
       error:   buildError,
     }))
   }

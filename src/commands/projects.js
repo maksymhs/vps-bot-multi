@@ -1206,8 +1206,26 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
   }
 }
 
-// Poll container /health in background; edit the Telegram message to ✅ when app is running
-async function pollUntilReady(ctx, userId, name, loadingMsg) {
+// ── Per-user change queue: accumulate changes sent while a build is running ───
+export const changeQueue = new Map()  // String(userId) → [{description, input, ctx}]
+
+// Progress bar helpers for Telegram build status messages
+const PHASE_STEPS = { starting: 0, thinking: 2, editing: 4, installing: 6, building: 8, launching: 9, running: 10 }
+function buildProgressText(name, url, phase) {
+  const n = PHASE_STEPS[phase] ?? 1
+  const bar = '▓'.repeat(n) + '░'.repeat(10 - n)
+  const label = phase === 'thinking'   ? 'Agent thinking...'
+    : phase === 'editing'    ? 'Applying changes...'
+    : phase === 'installing' ? 'Installing deps...'
+    : phase === 'building'   ? 'Building...'
+    : phase === 'launching'  ? 'Launching...'
+    : 'Starting...'
+  return `⏳ *${name}*\nRebuilding...\n\n\`${bar}\` ${label}\n\n[👁 Watch live](${url}/console)`
+}
+
+// Poll container /health in background; update Telegram message with progress bar,
+// then show completion message with applied change + "type next change" hint.
+async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
   if (!loadingMsg) return
   const containerName = userStore.containerName(userId, name)
   // Wait for container IP (may take a couple seconds on first boot)
@@ -1219,19 +1237,62 @@ async function pollUntilReady(ctx, userId, name, loadingMsg) {
   }
   if (!host) return
   const url = projectUrl(userId, name)
-  // Poll /health every 5s for up to 5 minutes
-  for (let i = 0; i < 60; i++) {
-    await new Promise(r => setTimeout(r, 5000))
+  let lastPhase = null
+
+  // Poll /health every 3s for up to 5 minutes
+  for (let i = 0; i < 100; i++) {
+    await new Promise(r => setTimeout(r, 3000))
     try {
       const ctrl = new AbortController()
       const tid = setTimeout(() => ctrl.abort(), 3000)
       const resp = await fetch(`http://${host}:3000/health`, { signal: ctrl.signal })
       clearTimeout(tid)
       const data = await resp.json()
+      const phase = data.phase || data.state || 'starting'
+
+      // Update progress bar whenever phase changes (avoids Telegram rate limits)
+      if (phase !== lastPhase && data.state !== 'running' && data.state !== 'error') {
+        lastPhase = phase
+        const { Markup } = await import('telegraf')
+        await ctx.telegram.editMessageText(
+          loadingMsg.chat.id, loadingMsg.message_id, null,
+          buildProgressText(name, url, phase),
+          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.url('👁 Watch Live', url + '/console')]]) }
+        ).catch(() => {})
+      }
+
       if (data.state === 'running') {
-        await sendProjectMessage(ctx, name, true, loadingMsg)
+        // Build complete — show completion message with applied change
+        const { Markup } = await import('telegraf')
+        const appliedLine = userInput ? `\n_Applied: "${userInput.slice(0, 80)}"_` : ''
+        const completionText =
+          `✅ *${name}* is ready\n🔗 ${url}${appliedLine}\n\n_Type your next change directly in the chat._`
+        await ctx.telegram.editMessageText(
+          loadingMsg.chat.id, loadingMsg.message_id, null,
+          completionText,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.url('🔗 Open', url), Markup.button.callback('♻️ Rebuild', `rb:${name}`)],
+              [Markup.button.callback('📋 Logs', `lg:${name}`), Markup.button.callback('⬅️ List', 'list')],
+            ]),
+          }
+        ).catch(() => {})
+
+        // Process any change queued while this build was running
+        const uid = String(userId)
+        const queue = changeQueue.get(uid) || []
+        const next = queue.shift()
+        if (next) {
+          changeQueue.set(uid, queue)
+          const buildKey = `${userStore.getUserSlug(next.ctx.from.id)}-${name}`
+          buildingSet.add(buildKey)
+          enqueueBuild(buildKey, () => deployRebuild(next.ctx, name, next.description, null, 'patch', next.input))
+            .finally(() => buildingSet.delete(buildKey))
+        }
         return
       }
+
       if (data.state === 'error') {
         const { Markup } = await import('telegraf')
         await ctx.telegram.editMessageText(
@@ -1262,7 +1323,7 @@ export async function deployNew(ctx, name, description, model = null) {
   return result
 }
 
-export async function deployRebuild(ctx, name, description, model = null, mode = 'patch') {
+export async function deployRebuild(ctx, name, description, model = null, mode = 'patch', userInput = null) {
   const userId = getUserId(ctx)
   const dir = userStore.projectDir(userId, name)
 
@@ -1282,7 +1343,7 @@ export async function deployRebuild(ctx, name, description, model = null, mode =
   if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
     await sendProjectMessage(ctx, name, result, loadingMsg, mode)
-    if (result === 'async') pollUntilReady(ctx, userId, name, loadingMsg)
+    if (result === 'async') pollUntilReady(ctx, userId, name, loadingMsg, userInput)
   } else if (loadingMsg) {
     await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {})
   }

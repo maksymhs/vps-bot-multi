@@ -5,7 +5,8 @@
       "Read",
       "Write",
       "Edit",
-      "Bash"
+      "Bash",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "defaultMode": "acceptEdits"
   }
