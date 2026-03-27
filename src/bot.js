@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import { Telegraf } from 'telegraf'
 import { execFile } from 'child_process'
-import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl, generateProjectName, changeQueue } from './commands/projects.js'
+import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl, generateProjectName } from './commands/projects.js'
 import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild } from './commands/menu.js'
 import { userStore } from './lib/user-store.js'
 import { getDocker } from './lib/docker-client.js'
@@ -179,14 +179,7 @@ bot.on('text', async (ctx, next) => {
       const slug = userStore.getUserSlug(userId)
       const buildKey = `${slug}-${lastProject}`
       if (buildingSet.has(buildKey) || pollingSet.has(buildKey)) {
-        // Queue the change — will be applied automatically when the current build finishes
-        const q = changeQueue.get(String(userId)) || []
-        q.push({ description, input, ctx })
-        changeQueue.set(String(userId), q)
-        return ctx.reply(
-          `📝 *${lastProject}* is building — change queued (${q.length} pending).\n_Will apply automatically when done._`,
-          { parse_mode: 'Markdown' }
-        )
+        return ctx.reply(`⏳ *${lastProject}* is still building — please wait until it finishes.`, { parse_mode: 'Markdown' })
       }
       buildingSet.add(buildKey)
       const qs = getQueueStatus()

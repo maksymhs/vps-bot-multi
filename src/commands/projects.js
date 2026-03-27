@@ -1206,9 +1206,6 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
   }
 }
 
-// ── Per-user change queue: accumulate changes sent while a build is running ───
-export const changeQueue = new Map()  // String(userId) → [{description, input, ctx}]
-
 // Progress bar helpers for Telegram build status messages
 const PHASE_STEPS = { starting: 0, thinking: 2, editing: 4, installing: 6, building: 8, launching: 9, running: 10 }
 function buildProgressText(name, url, phase, userInput) {
@@ -1244,18 +1241,6 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
   if (!host) { pollingSet.delete(buildKey); return }
   const url = projectUrl(userId, name)
   let lastPhase = null
-
-  // Helper to dequeue and fire the next pending change for this project
-  const processQueue = () => {
-    const uid = String(userId)
-    const queue = changeQueue.get(uid) || []
-    const next = queue.shift()
-    if (!next) return
-    changeQueue.set(uid, queue)
-    const nextKey = `${userStore.getUserSlug(next.ctx.from.id)}-${name}`
-    enqueueBuild(nextKey, () => deployRebuild(next.ctx, name, next.description, null, 'patch', next.input))
-      .finally(() => buildingSet.delete(nextKey))
-  }
 
   // Poll /health every 3s for up to 5 minutes
   for (let i = 0; i < 100; i++) {
@@ -1310,8 +1295,6 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
           completionText,
           { parse_mode: 'Markdown', ...completionKeyboard }
         ).catch(() => {})
-
-        processQueue()
         return
       }
 
@@ -1323,7 +1306,6 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
           `❌ *${name}* build failed\n_[View error log](${url}/console)_`,
           { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.url('📋 Error log', url + '/console')]]) }
         ).catch(() => {})
-        processQueue()
         return
       }
     } catch { /* container not ready yet, keep polling */ }
