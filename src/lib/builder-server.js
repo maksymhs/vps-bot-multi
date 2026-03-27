@@ -755,8 +755,13 @@ async function runAgenticPatch(description, errorContext, attempt) {
   } catch {}
 
   // ── Launch app — retry with crash log if it dies quickly ──────────────────
-  // Kill any pre-launched boilerplate (or previous patched version) before spawning
-  if (currentApp) { currentApp.kill('SIGTERM'); currentApp = null }
+  // Kill any pre-launched boilerplate (or previous patched version) before spawning.
+  // Wait briefly so the OS frees port 3001 before the new process binds it.
+  if (currentApp) {
+    currentApp.kill('SIGTERM')
+    currentApp = null
+    await new Promise(function(r) { setTimeout(r, 600) })
+  }
   broadcast({ type: 'launching', message: isRetry ? 'Relaunching after fix...' : 'Launching app...' })
   const crashError = await spawnApp(startBin, startArgs)
   if (crashError) {
@@ -825,12 +830,15 @@ function proxyToApp(req, res) {
           : body + REBUILD_WATCHER
         const outHeaders = Object.assign({}, proxyRes.headers)
         delete outHeaders['content-length']   // length changed after injection
-        outHeaders['cache-control'] = 'no-store'   // always fetch fresh after rebuild
+        outHeaders['cache-control'] = 'no-store'
         res.writeHead(proxyRes.statusCode, outHeaders)
         res.end(body)
       })
     } else {
-      res.writeHead(proxyRes.statusCode, proxyRes.headers)
+      // CSS/JS/images: also no-store so rebuilds are always reflected immediately
+      const outHeaders = Object.assign({}, proxyRes.headers)
+      outHeaders['cache-control'] = 'no-store'
+      res.writeHead(proxyRes.statusCode, outHeaders)
       proxyRes.pipe(res)
     }
   })
