@@ -172,6 +172,7 @@ async function runAll(errorContext) {
   filesWritten = 0
   currentFile  = null
   contentLines = []
+  sseBuffer.length = 0   // clear replay buffer so new clients don't see previous build
 
   // ── 1. Read prompts ─────────────────────────────────────────────────────────
   broadcast({ type: 'status', message: errorContext ? 'AI is patching the error...' : 'Reading build prompt...' })
@@ -761,6 +762,7 @@ async function startRebuild(description) {
   state = 'building'
   buildError = null
   filesWritten = 0
+  sseBuffer.length = 0   // clear replay buffer — rebuild starts fresh
   broadcast({ type: 'phase', phase: 'rebuilding', message: 'Agent is reading the codebase...' })
 
   runAgenticPatch(description)
