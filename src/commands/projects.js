@@ -294,6 +294,26 @@ async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
     return false
   }
 
+  // Wait until builder-server.js is actually serving before sending the URL.
+  // Resolve container address (domain mode → container IP, IP mode → host:port).
+  let healthHost, healthPort
+  const project = userStore.getProject(userId, name)
+  if (!config.domain && project?.port) {
+    healthHost = '127.0.0.1'
+    healthPort = project.port
+  } else {
+    for (let i = 0; i < 20; i++) {
+      const ip = await getContainerIpByFullName(containerName)
+      if (ip) { healthHost = ip; healthPort = 3000; break }
+      await new Promise(r => setTimeout(r, 1000))
+    }
+  }
+
+  if (healthHost) {
+    await pollHealth(healthHost, healthPort, 30_000)
+    log.build(logName, `Builder console ready at ${healthHost}:${healthPort}`)
+  }
+
   const url = projectUrl(userId, name)
   log.build(logName, `Builder container live → ${url}`)
   await onStatus(`🌐 Open now: ${url}\n🧠 AI is building your app live...`)
