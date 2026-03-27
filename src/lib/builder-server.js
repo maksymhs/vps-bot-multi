@@ -110,7 +110,7 @@ function spawnApp(bin, args) {
 
     currentApp = cp.spawn(bin, args, {
       cwd:      WORKSPACE,
-      env:      Object.assign({}, process.env, { PORT: String(APP_PORT) }),
+      env:      Object.assign({}, process.env, { PORT: String(APP_PORT), NEXT_TELEMETRY_DISABLED: '1' }),
       stdio:    ['ignore', 'pipe', 'pipe'],
       detached: false,
     })
@@ -781,9 +781,12 @@ async function runAgenticPatch(description, errorContext, attempt) {
   // Kill any pre-launched boilerplate (or previous patched version) before spawning.
   // Wait briefly so the OS frees port 3001 before the new process binds it.
   if (currentApp) {
-    currentApp.kill('SIGTERM')
+    // SIGKILL instead of SIGTERM: on Alpine, npm catches SIGTERM and calls process.exit(0),
+    // which our exit handler mistakes for a normal exit and calls process.exit(0) on the builder.
+    // SIGKILL forces immediate kill → Node.js reports signal='SIGKILL' → correctly ignored.
+    currentApp.kill('SIGKILL')
     currentApp = null
-    await new Promise(function(r) { setTimeout(r, 600) })
+    await new Promise(function(r) { setTimeout(r, 1000) }) // OS needs ~1s to free port 3001
   }
   currentPhase = 'launching'
   broadcast({ type: 'launching', message: isRetry ? 'Relaunching after fix...' : 'Launching app...' })
@@ -802,7 +805,7 @@ async function startRebuild(description) {
   console.log('[builder] HTTP rebuild triggered:', description)
 
   // Kill app process only — container keeps running
-  if (currentApp) { currentApp.kill('SIGTERM'); currentApp = null }
+  if (currentApp) { currentApp.kill('SIGKILL'); currentApp = null }
 
   state = 'building'
   buildError = null
