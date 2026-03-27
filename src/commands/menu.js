@@ -100,7 +100,7 @@ export async function showProject(ctx, name) {
     : Markup.button.callback('▶️ Start', `go:${name}`)
 
   return ctx.editMessageText(
-    `📦 *${name}*  ${icon}${sleeping}\n\n🔗 ${project.url}\n_${desc}_`,
+    `📦 *${name}*  ${icon}${sleeping}\n\n🔗 ${project.url}\n_${desc}_\n\n💬 _Just type in the chat to request changes._`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
