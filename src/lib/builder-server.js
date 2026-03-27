@@ -103,6 +103,18 @@ function fail(msg) {
 // ── App spawn: runs on APP_PORT, detects quick startup crashes ───────────────
 // Returns: error string if app crashed quickly, undefined if stable
 const CRASH_WINDOW_MS = 6000
+
+// Kill the app AND its entire process group (npm → sh → next dev).
+// Without this, killing npm leaves sh+next orphaned and port 3001 still in use.
+function killCurrentApp() {
+  if (!currentApp) return
+  const pid = currentApp.pid
+  currentApp = null
+  if (pid) {
+    try { process.kill(-pid, 'SIGKILL') } catch {}  // kill process group
+  }
+}
+
 function spawnApp(bin, args) {
   return new Promise(function(resolve) {
     let errorOutput = ''
@@ -112,10 +124,11 @@ function spawnApp(bin, args) {
       cwd:      WORKSPACE,
       env:      Object.assign({}, process.env, { PORT: String(APP_PORT), NEXT_TELEMETRY_DISABLED: '1' }),
       stdio:    ['ignore', 'pipe', 'pipe'],
-      detached: false,
+      detached: true,   // create own process group so killCurrentApp(-pid) only kills the app tree
     })
     state = 'running'
     currentPhase = 'running'
+    broadcast({ type: 'ready', state: 'running' })   // ← tells loading page & watcher to reload
 
     currentApp.stdout.on('data', function(d) { process.stdout.write(d); errorOutput += d.toString() })
     currentApp.stderr.on('data', function(d) { process.stderr.write(d); errorOutput += d.toString() })
@@ -781,12 +794,8 @@ async function runAgenticPatch(description, errorContext, attempt) {
   // Kill any pre-launched boilerplate (or previous patched version) before spawning.
   // Wait briefly so the OS frees port 3001 before the new process binds it.
   if (currentApp) {
-    // SIGKILL instead of SIGTERM: on Alpine, npm catches SIGTERM and calls process.exit(0),
-    // which our exit handler mistakes for a normal exit and calls process.exit(0) on the builder.
-    // SIGKILL forces immediate kill → Node.js reports signal='SIGKILL' → correctly ignored.
-    currentApp.kill('SIGKILL')
-    currentApp = null
-    await new Promise(function(r) { setTimeout(r, 1000) }) // OS needs ~1s to free port 3001
+    killCurrentApp()  // kills npm + sh + next dev (entire process group)
+    await new Promise(function(r) { setTimeout(r, 800) })
   }
   currentPhase = 'launching'
   broadcast({ type: 'launching', message: isRetry ? 'Relaunching after fix...' : 'Launching app...' })
@@ -805,7 +814,7 @@ async function startRebuild(description) {
   console.log('[builder] HTTP rebuild triggered:', description)
 
   // Kill app process only — container keeps running
-  if (currentApp) { currentApp.kill('SIGKILL'); currentApp = null }
+  killCurrentApp()
 
   state = 'building'
   buildError = null
@@ -823,11 +832,67 @@ async function startRebuild(description) {
 // (no redirect — user stays on the page). When done, hides panel + reloads in-place.
 const REBUILD_WATCHER = `<script>
 (function(){
-var ov=null
-function badge(txt){if(!ov){ov=document.createElement('div');ov.style.cssText='position:fixed;bottom:16px;right:16px;background:#18181b;color:#a1a1aa;font:12px/1.4 system-ui,sans-serif;padding:8px 14px;border-radius:8px;border:1px solid #27272a;z-index:2147483647;transition:opacity .3s';document.body.appendChild(ov)}ov.style.opacity='1';ov.textContent=txt}
-function hideBadge(){if(ov){ov.style.opacity='0';setTimeout(function(){if(ov){ov.remove();ov=null}},300)}}
-var prev='running'
-function poll(){fetch('/health').then(function(r){return r.json()}).then(function(d){if(prev==='running'&&(d.state==='building'||d.state==='installing')){badge('⚡ Updating...')}if((prev==='building'||prev==='installing')&&d.state==='running'){hideBadge();window.location.reload();return}prev=d.state;setTimeout(poll,2000)}).catch(function(){setTimeout(poll,3000)})}
+var panel=null,log=null,es=null,prev='running',lastLogType=''
+var LABELS={thinking:'Agent thinking…',editing:'Applying changes…',installing:'Installing packages…',building:'Building…',launching:'Launching…',running:'Done',error:'Error'}
+function createPanel(){
+  if(panel)return
+  var s=document.createElement('style')
+  s.textContent='#vpsbot-panel{position:fixed;bottom:0;left:0;right:0;height:220px;background:#0f0f11;border-top:1px solid #27272a;z-index:2147483647;display:flex;flex-direction:column;transform:translateY(100%);transition:transform .3s ease;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",monospace}#vpsbot-panel.show{transform:translateY(0)}#vpsbot-header{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #27272a;flex-shrink:0}#vpsbot-spinner{width:14px;height:14px;border:2px solid #27272a;border-top-color:#6366f1;border-radius:50%;animation:vpssp .6s linear infinite;flex-shrink:0}@keyframes vpssp{to{transform:rotate(360deg)}}#vpsbot-phase{font-size:12px;color:#a1a1aa}#vpsbot-log{flex:1;overflow-y:auto;padding:6px 12px;font-size:11px;line-height:1.5;color:#71717a}'
+  document.head.appendChild(s)
+  panel=document.createElement('div');panel.id='vpsbot-panel'
+  var hdr=document.createElement('div');hdr.id='vpsbot-header'
+  var sp=document.createElement('div');sp.id='vpsbot-spinner'
+  var ph=document.createElement('div');ph.id='vpsbot-phase';ph.textContent='⚡ Updating…'
+  hdr.appendChild(sp);hdr.appendChild(ph);panel.appendChild(hdr)
+  log=document.createElement('div');log.id='vpsbot-log';panel.appendChild(log)
+  document.body.appendChild(panel)
+  requestAnimationFrame(function(){requestAnimationFrame(function(){panel.classList.add('show')})})
+}
+function appendLog(txt){
+  if(!log)return
+  var line=document.createElement('div');line.textContent=txt;log.appendChild(line)
+  log.scrollTop=log.scrollHeight
+}
+function setPhase(ph){var el=document.getElementById('vpsbot-phase');if(el)el.textContent='⚡ '+(LABELS[ph]||ph)}
+function hidePanel(){
+  if(!panel)return
+  panel.classList.remove('show')
+  setTimeout(function(){if(panel){panel.remove();panel=null;log=null}},300)
+  if(es){es.close();es=null}
+}
+function startSSE(){
+  if(es)return
+  try{
+    es=new EventSource('/events')
+    es.onmessage=function(e){
+      try{
+        var d=JSON.parse(e.data)
+        if(d.state==='running'){hidePanel();window.location.reload();return}
+        if(d.type==='phase')setPhase(d.phase)
+        if(d.type==='thinking'&&lastLogType!=='thinking'){appendLog('💭 Thinking…')}
+        if(d.type==='tool_start'&&d.tool)appendLog('🔧 '+d.tool+(d.label?' — '+d.label:''))
+        if(d.type==='tool_done'&&d.text)appendLog((d.icon||'✓')+' '+d.text)
+        if(d.type==='status'&&d.message)appendLog(d.message)
+        if(d.type==='log'&&d.content)appendLog(d.content.trim())
+        lastLogType=d.type
+        if(d.state==='error'){setPhase('error')}
+      }catch(ex){}
+    }
+    es.onerror=function(){es.close();es=null;setTimeout(startSSE,3000)}
+  }catch(ex){}
+}
+function poll(){
+  fetch('/health').then(function(r){return r.json()}).then(function(d){
+    if(prev==='running'&&(d.state==='building'||d.state==='installing')){
+      createPanel();startSSE()
+    }
+    if((prev==='building'||prev==='installing')&&d.state==='running'){
+      hidePanel();window.location.reload();return
+    }
+    prev=d.state
+    setTimeout(poll,2000)
+  }).catch(function(){setTimeout(poll,3000)})
+}
 setTimeout(poll,2000)
 })()
 </script>`
@@ -886,21 +951,73 @@ const HTML = `<!DOCTYPE html>
 <title>${PROJECT}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;background:#0f0f11;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:20px}
+html,body{height:100%;background:#0f0f11;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;flex-direction:column;overflow:hidden}
+.hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;min-height:0}
 .ring{width:44px;height:44px;border:3px solid #27272a;border-top-color:#6366f1;border-radius:50%;animation:sp .75s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
 .name{font-size:18px;font-weight:600;color:#fafafa}
-.phase{font-size:13px;color:#71717a;letter-spacing:.2px}
+.phase{font-size:13px;color:#71717a;letter-spacing:.2px;transition:color .3s}
+.phase.error{color:#f87171}
+.logbox{height:200px;flex-shrink:0;border-top:1px solid #27272a;background:#09090b;display:flex;flex-direction:column}
+.loghdr{font-size:10px;color:#52525b;padding:4px 12px;border-bottom:1px solid #1a1a1f;letter-spacing:.5px;text-transform:uppercase;flex-shrink:0}
+.loglines{flex:1;overflow-y:auto;padding:6px 12px;font-size:11px;line-height:1.6;color:#71717a;font-family:ui-monospace,SFMono-Regular,monospace}
+.loglines div{white-space:pre-wrap;word-break:break-all}
 </style>
 </head>
 <body>
-<div class="ring"></div>
-<div class="name">${PROJECT}</div>
-<div class="phase" id="ph">Starting…</div>
+<div class="hero">
+  <div class="ring" id="ring"></div>
+  <div class="name">${PROJECT}</div>
+  <div class="phase" id="ph">Starting…</div>
+</div>
+<div class="logbox">
+  <div class="loghdr">Build log</div>
+  <div class="loglines" id="log"></div>
+</div>
 <script>
-var LABELS={thinking:'Thinking…',editing:'Applying changes…',installing:'Installing packages…',building:'Building…',launching:'Launching…',running:'Ready',error:'Build failed'}
-function poll(){fetch('/health').then(function(r){return r.json()}).then(function(d){var ph=d.phase||d.state||'building';document.getElementById('ph').textContent=LABELS[ph]||ph;if(d.state==='running'){window.location.reload();return}if(d.state==='error'){return}setTimeout(poll,2000)}).catch(function(){setTimeout(poll,3000)})}
-poll()
+var LABELS={thinking:'Thinking…',editing:'Applying changes…',installing:'Installing packages…',building:'Building…',launching:'Launching…',running:'Ready!',error:'Build failed'}
+var logEl=document.getElementById('log')
+var phEl=document.getElementById('ph')
+var es=null,lastLogType=''
+
+function appendLog(txt){
+  var d=document.createElement('div');d.textContent=txt;logEl.appendChild(d)
+  logEl.scrollTop=logEl.scrollHeight
+}
+function setPhase(ph){phEl.textContent=LABELS[ph]||ph;phEl.className='phase'+(ph==='error'?' error':'')}
+
+function startSSE(){
+  try{
+    es=new EventSource('/events')
+    es.onmessage=function(e){
+      try{
+        var d=JSON.parse(e.data)
+        if(d.state==='running'){window.location.reload();return}
+        if(d.type==='connected')setPhase(d.state||'building')
+        if(d.type==='phase')setPhase(d.phase)
+        if(d.type==='thinking'&&lastLogType!=='thinking')appendLog('💭 Thinking…')
+        if(d.type==='tool_start'&&d.tool)appendLog('🔧 '+d.tool+(d.label?' — '+d.label:''))
+        if(d.type==='tool_done'&&d.text)appendLog((d.icon||'✓')+' '+d.text)
+        if(d.type==='status'&&d.message)appendLog(d.message)
+        if(d.type==='log'&&d.content)appendLog(d.content.trim())
+        lastLogType=d.type
+        if(d.state==='error')setPhase('error')
+      }catch(ex){}
+    }
+    es.onerror=function(){es.close();es=null;setTimeout(fallbackPoll,3000)}
+  }catch(ex){fallbackPoll()}
+}
+
+function fallbackPoll(){
+  fetch('/health').then(function(r){return r.json()}).then(function(d){
+    setPhase(d.phase||d.state||'building')
+    if(d.state==='running'){window.location.reload();return}
+    if(d.state==='error')return
+    setTimeout(fallbackPoll,2000)
+  }).catch(function(){setTimeout(fallbackPoll,3000)})
+}
+
+startSSE()
 </script>
 </body>
 </html>`
