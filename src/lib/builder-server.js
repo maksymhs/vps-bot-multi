@@ -425,6 +425,123 @@ Rules:
 const AGENT_MAX_ITERS  = 14
 const MAX_FIX_ATTEMPTS = 2   // max retry rounds on build/crash error
 
+// ── Plan+Execute: one-shot strategy — all files in context → JSON plan → apply ─
+// Replaces the iterative tool loop on first attempt. Falls back to tool loop if
+// plan parsing fails or all edits fail (old_string not found).
+const PLAN_SYSTEM = `You are a code editor. You receive a task and ALL current project files.
+Return ONLY a valid JSON object — no markdown fences, no text outside JSON.
+
+{
+  "summary": "one-line description of what you changed",
+  "edits": [
+    { "file": "relative/path", "old": "exact verbatim snippet to replace", "new": "replacement" }
+  ],
+  "creates": [
+    { "file": "relative/path", "content": "full new file content" }
+  ]
+}
+
+Rules:
+- "old" must be an exact verbatim substring of the current file (no paraphrasing, exact whitespace)
+- Use the shortest unique "old" snippet — just enough chars to be unambiguous in that file
+- Only change what the task requires — nothing else
+- Never edit: builder-server.js, Dockerfile, docker-compose.yml, .build-prompt.txt
+- App keeps GET /health returning {status:"ok"} and uses process.env.PORT`
+
+async function tryPlanExecute(description, errorContext) {
+  // Load all workspace files into one context string (capped at ~20k tokens)
+  const files = getWorkspaceFiles()
+  let ctxStr = '', chars = 0
+  const BUDGET = 80000
+
+  broadcast({ type: 'tool_start', tool: 'list_files', label: files.length + ' files' })
+  for (const f of files) {
+    try {
+      const content = fs.readFileSync(path.join(WORKSPACE, f), 'utf8')
+      const block   = '=== ' + f + ' ===\n' + content + '\n'
+      if (chars + block.length > BUDGET) continue
+      ctxStr += block; chars += block.length
+    } catch {}
+  }
+  broadcast({ type: 'tool_done', icon: '📂', text: 'list_files → ' + files.length + ' files loaded', ok: true })
+
+  const userMsg = (errorContext
+    ? 'Fix these errors:\n' + errorContext.slice(0, 1500) + '\n\nTask: '
+    : 'Task: ')
+    + description + '\n\n=== PROJECT FILES ===\n' + ctxStr
+
+  broadcast({ type: 'thinking' })
+
+  let plan
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method:  'POST',
+      headers: { 'Authorization': 'Bearer ' + OR_KEY, 'Content-Type': 'application/json',
+                 'HTTP-Referer': 'https://vps-bot-multi.local', 'X-Title': 'VPS-Bot-Multi' },
+      body: JSON.stringify({
+        model:           MODEL,
+        messages:        [{ role: 'system', content: PLAN_SYSTEM }, { role: 'user', content: userMsg }],
+        max_tokens:      6000,
+        response_format: { type: 'json_object' },
+      }),
+    })
+    if (!res.ok) { console.log('[plan] API error', res.status); return false }
+    const data = await res.json()
+    const raw  = data.choices?.[0]?.message?.content || ''
+    // Handle both raw JSON and markdown-fenced JSON from the model
+    const jsonStr = raw.match(/```(?:json)?\s*([\s\S]+?)```/)?.[1] ?? raw
+    plan = JSON.parse(jsonStr.trim())
+  } catch (err) {
+    console.log('[plan] parse failed:', err.message); return false
+  }
+
+  const edits   = plan.edits   || []
+  const creates = plan.creates || []
+  if (edits.length === 0 && creates.length === 0) { console.log('[plan] no changes'); return false }
+
+  let allOk = true
+
+  for (const edit of edits) {
+    if (!edit.file || PROTECTED.has(path.basename(edit.file))) continue
+    broadcast({ type: 'tool_start', tool: 'edit_file', label: edit.file })
+    try {
+      const fp = path.join(WORKSPACE, edit.file)
+      const content = fs.readFileSync(fp, 'utf8')
+      if (!content.includes(edit.old)) {
+        broadcast({ type: 'tool_done', icon: '❌', text: 'edit  ' + edit.file + ': not found', ok: false })
+        allOk = false
+      } else {
+        fs.writeFileSync(fp, content.replace(edit.old, edit.new))
+        filesWritten++
+        broadcast({ type: 'file', name: edit.file })
+        broadcast({ type: 'tool_done', icon: '✏️', text: 'edit  ' + edit.file, ok: true })
+      }
+    } catch (err) {
+      broadcast({ type: 'tool_done', icon: '❌', text: 'edit  ' + edit.file + ': ' + err.message, ok: false })
+      allOk = false
+    }
+  }
+
+  for (const create of creates) {
+    if (!create.file || PROTECTED.has(path.basename(create.file))) continue
+    broadcast({ type: 'tool_start', tool: 'write_file', label: create.file })
+    try {
+      const fp = path.join(WORKSPACE, create.file)
+      fs.mkdirSync(path.dirname(fp), { recursive: true })
+      fs.writeFileSync(fp, create.content)
+      filesWritten++
+      broadcast({ type: 'file', name: create.file })
+      broadcast({ type: 'tool_done', icon: '📝', text: 'write ' + create.file, ok: true })
+    } catch (err) {
+      broadcast({ type: 'tool_done', icon: '❌', text: 'write ' + create.file + ': ' + err.message, ok: false })
+      allOk = false
+    }
+  }
+
+  if (plan.summary) broadcast({ type: 'log', content: '✅ ' + plan.summary + '\n' })
+  return allOk
+}
+
 async function runAgenticPatch(description, errorContext, attempt) {
   if (attempt === undefined) attempt = 0
   const isRetry = attempt > 0
@@ -449,7 +566,15 @@ async function runAgenticPatch(description, errorContext, attempt) {
     { role: 'user',    content: userContent },
   ]
 
-  for (let iter = 0; iter < AGENT_MAX_ITERS; iter++) {
+  // Fast path: one API call with all files in context → JSON plan → apply instantly
+  // Falls back to the iterative tool loop if plan fails or edits don't apply cleanly
+  let skipToolLoop = false
+  if (!isRetry) {
+    skipToolLoop = await tryPlanExecute(description, errorContext)
+    if (!skipToolLoop) broadcast({ type: 'log', content: '⚠️  Plan pass failed — switching to tool loop\n' })
+  }
+
+  for (let iter = 0; !skipToolLoop && iter < AGENT_MAX_ITERS; iter++) {
     broadcast({ type: 'thinking' })
     let response
     try {
