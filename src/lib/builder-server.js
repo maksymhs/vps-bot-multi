@@ -7,6 +7,7 @@
 //       On /rebuild: kill app → DeepSeek patch → npm install → respawn on 3001
 // Uses only Node.js built-ins + global fetch (Node 18+). No external deps.
 import http from 'http'
+import net  from 'net'
 import fs   from 'fs'
 import path from 'path'
 import cp   from 'child_process'
@@ -115,6 +116,23 @@ function killCurrentApp() {
   }
 }
 
+// Poll APP_PORT until it accepts a TCP connection, then resolve.
+function waitForPort(port, timeoutMs) {
+  return new Promise(function(resolve) {
+    const deadline = Date.now() + (timeoutMs || 30000)
+    function attempt() {
+      const sock = net.createConnection(port, '127.0.0.1')
+      sock.once('connect', function() { sock.destroy(); resolve(true) })
+      sock.once('error', function() {
+        sock.destroy()
+        if (Date.now() >= deadline) { resolve(false); return }
+        setTimeout(attempt, 250)
+      })
+    }
+    attempt()
+  })
+}
+
 function spawnApp(bin, args) {
   return new Promise(function(resolve) {
     let errorOutput = ''
@@ -126,33 +144,44 @@ function spawnApp(bin, args) {
       stdio:    ['ignore', 'pipe', 'pipe'],
       detached: true,   // create own process group so killCurrentApp(-pid) only kills the app tree
     })
-    state = 'running'
-    currentPhase = 'running'
-    broadcast({ type: 'ready', state: 'running' })   // ← tells loading page & watcher to reload
 
     currentApp.stdout.on('data', function(d) { process.stdout.write(d); errorOutput += d.toString() })
     currentApp.stderr.on('data', function(d) { process.stderr.write(d); errorOutput += d.toString() })
 
+    let settled = false
+    function settle(errMsg) {
+      if (settled) return; settled = true
+      resolve(errMsg)
+    }
+
     currentApp.on('error', function(err) {
       currentApp = null
       state = 'building'
-      resolve(err.message)
+      settle(err.message)
     })
 
     currentApp.on('exit', function(code, signal) {
       currentApp = null
       if (signal === 'SIGTERM' || signal === 'SIGKILL') {
-        // Intentionally killed for rebuild — don't exit the process
-        resolve(undefined)
+        settle(undefined)
         return
       }
       const quickCrash = code !== 0 && (Date.now() - startedAt) < CRASH_WINDOW_MS
       if (quickCrash) {
         state = 'building'
-        resolve(errorOutput.slice(-1500))
+        settle(errorOutput.slice(-1500))
       } else {
         process.exit(code || 0)
       }
+    })
+
+    // Wait until the app is actually accepting connections before declaring it running
+    waitForPort(APP_PORT, 30000).then(function(ok) {
+      if (settled) return   // already failed (crash/error)
+      if (!ok) { settle('Timed out waiting for app to listen on port ' + APP_PORT); return }
+      state = 'running'
+      currentPhase = 'running'
+      broadcast({ type: 'ready', state: 'running' })  // tells loading page / watcher to reload
     })
   })
 }
@@ -939,8 +968,12 @@ function proxyToApp(req, res) {
     }
   })
   proxy.on('error', function() {
-    res.writeHead(502, { 'Content-Type': 'text/plain' })
-    res.end('App not ready yet')
+    // App process started but not yet listening — serve loading page so the
+    // browser's SSE connection keeps polling and reloads when truly ready.
+    if (!res.headersSent) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(HTML)
+    }
   })
   req.pipe(proxy)
 }
