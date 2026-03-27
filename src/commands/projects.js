@@ -1206,15 +1206,12 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
   ]
 
   if (result === 'async' && mode === 'patch') {
-    text = `🔨 *${name}* is being patched\n🖥 [Watch live](${url}/console)\n\n_When done the page reloads to the updated app automatically._`
-    keyboard = Markup.inlineKeyboard([
-      [Markup.button.url('👁 Watch Live', url + '/console')],
-      ...baseButtons,
-    ])
+    text = `🔨 *${name}* — patching\n\n_The page will reload automatically when done._`
+    keyboard = Markup.inlineKeyboard(baseButtons)
   } else if (result === 'async') {
-    text = `🚀 *${name}*\n🖥 [Watch build](${url}/console)\n\n_Boilerplate is live — tap to watch the agent customise it. Redirects to app when done._`
+    text = `🚀 *${name}*\n\n_Building your app — the URL will show it live when ready._\n🔗 ${url}`
     keyboard = Markup.inlineKeyboard([
-      [Markup.button.url('👁 Watch Build', url + '/console')],
+      [Markup.button.url('🔗 Open', url)],
       ...baseButtons,
     ])
   } else {
@@ -1247,7 +1244,7 @@ function buildProgressText(name, url, phase, userInput) {
   if (userInput) {
     return `🔨 *${name}* — _"${userInput.slice(0, 55)}"_\n\`${bar}\` ${label}`
   }
-  return `⏳ *${name}*\nRebuilding...\n\n\`${bar}\` ${label}\n\n[👁 Watch live](${url}/console)`
+  return `⏳ *${name}*\nRebuilding...\n\n\`${bar}\` ${label}`
 }
 
 // Poll container /health in background; update Telegram message with progress bar,
@@ -1283,13 +1280,10 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
       if (phase !== lastPhase && data.state !== 'running' && data.state !== 'error') {
         lastPhase = phase
         const { Markup } = await import('telegraf')
-        const progressKeyboard = userInput
-          ? []  // conversational: no extra button, message is already compact
-          : [[Markup.button.url('👁 Watch Live', url + '/console')]]
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
           buildProgressText(name, url, phase, userInput),
-          { parse_mode: 'Markdown', ...Markup.inlineKeyboard(progressKeyboard) }
+          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([]) }
         ).catch(() => {})
       }
 
@@ -1329,8 +1323,8 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
         const { Markup } = await import('telegraf')
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
-          `❌ *${name}* build failed\n_[View error log](${url}/console)_`,
-          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.url('📋 Error log', url + '/console')]]) }
+          `❌ *${name}* build failed`,
+          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('♻️ Retry', `rb:${name}`), Markup.button.callback('⬅️ Menu', 'main')]]) }
         ).catch(() => {})
         return
       }

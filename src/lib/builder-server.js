@@ -820,74 +820,12 @@ async function startRebuild(description) {
 // (no redirect — user stays on the page). When done, hides panel + reloads in-place.
 const REBUILD_WATCHER = `<script>
 (function(){
-var OV=null,ES=null,LIVE=null,SP=['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'],si=0,st=null
-
-function show(){
-  if(OV)return
-  OV=document.createElement('div')
-  OV.style.cssText='position:fixed;bottom:0;left:0;right:0;height:260px;background:#0d1117;color:#c9d1d9;font:12px/1.6 monospace;z-index:2147483647;display:flex;flex-direction:column;border-top:2px solid #1f6feb;box-shadow:0 -4px 24px #0008;transform:translateY(100%);transition:transform .25s ease'
-  var hd=document.createElement('div')
-  hd.style.cssText='background:#161b22;padding:7px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #30363d;flex-shrink:0'
-  hd.innerHTML='<span style="color:#58a6ff;font-weight:600">🔨 Building ${PROJECT}...</span><a onclick="this.closest(\\'[style*=fixed]\\').style.transform=\\'translateY(100%)\\'" style="cursor:pointer;color:#8b949e;font-size:16px;text-decoration:none">✕</a>'
-  var lg=document.createElement('div')
-  lg.id='_vb_log'
-  lg.style.cssText='flex:1;overflow-y:auto;padding:8px 16px'
-  OV.appendChild(hd);OV.appendChild(lg)
-  document.body.appendChild(OV)
-  requestAnimationFrame(function(){OV.style.transform='translateY(0)'})
-}
-function hide(){
-  if(!OV)return
-  OV.style.transform='translateY(100%)'
-  setTimeout(function(){if(OV){OV.remove();OV=null}},300)
-}
-function log(txt,col){
-  var lg=document.getElementById('_vb_log');if(!lg)return
-  if(LIVE){LIVE.remove();LIVE=null}
-  var d=document.createElement('div');d.style.color=col||'#8b949e';d.textContent=txt
-  lg.appendChild(d);lg.scrollTop=lg.scrollHeight
-}
-function live(txt){
-  var lg=document.getElementById('_vb_log');if(!lg)return
-  if(!LIVE){LIVE=document.createElement('div');LIVE.style.color='#58a6ff';lg.appendChild(LIVE)}
-  LIVE.textContent=SP[si%SP.length]+' '+txt;lg.scrollTop=lg.scrollHeight
-  if(!st)st=setInterval(function(){si++;if(LIVE)LIVE.textContent=SP[si%SP.length]+' '+txt},80)
-}
-function endLive(txt,ok){
-  if(st){clearInterval(st);st=null}
-  if(LIVE){LIVE.remove();LIVE=null}
-  log(txt,ok?'#3fb950':'#f85149')
-}
-function watch(){
-  show()
-  if(ES){ES.close()}
-  ES=new EventSource('/events')
-  ES.onmessage=function(e){
-    var d=JSON.parse(e.data)
-    if(d.type==='connected')return
-    if(d.type==='thinking')live('Agent thinking...')
-    else if(d.type==='tool_start')live(d.tool.replace(/_/g,' ')+(d.label?' '+d.label:'')+'...')
-    else if(d.type==='tool_done')endLive(d.icon+' '+d.text,d.ok)
-    else if(d.type==='status')log('> '+d.message,'#58a6ff')
-    else if(d.type==='phase')log('── '+d.message,'#58a6ff')
-    else if(d.type==='log'){var ls=d.content.split('\\n');for(var i=0;i<ls.length;i++)if(ls[i])log(ls[i])}
-    else if(d.type==='running'||d.type==='launching'){
-      endLive(null,true)
-      log('── '+d.message,'#3fb950')
-      ES.close()
-      setTimeout(function(){hide();window.location.reload()},1200)
-    }
-    else if(d.type==='error'){endLive('✗ '+d.message,false)}
-  }
-  ES.onerror=function(){ES.close()}
-}
-function chk(){
-  fetch('/health').then(function(r){return r.json()}).then(function(d){
-    if(d.state==='building'||d.state==='installing'){watch();return}
-    setTimeout(chk,2000)
-  }).catch(function(){setTimeout(chk,3000)})
-}
-setTimeout(chk,1500)
+var ov=null
+function badge(txt){if(!ov){ov=document.createElement('div');ov.style.cssText='position:fixed;bottom:16px;right:16px;background:#18181b;color:#a1a1aa;font:12px/1.4 system-ui,sans-serif;padding:8px 14px;border-radius:8px;border:1px solid #27272a;z-index:2147483647;transition:opacity .3s';document.body.appendChild(ov)}ov.style.opacity='1';ov.textContent=txt}
+function hideBadge(){if(ov){ov.style.opacity='0';setTimeout(function(){if(ov){ov.remove();ov=null}},300)}}
+var prev='running'
+function poll(){fetch('/health').then(function(r){return r.json()}).then(function(d){if(prev==='running'&&(d.state==='building'||d.state==='installing')){badge('⚡ Updating...')}if((prev==='building'||prev==='installing')&&d.state==='running'){hideBadge();window.location.reload();return}prev=d.state;setTimeout(poll,2000)}).catch(function(){setTimeout(poll,3000)})}
+setTimeout(poll,2000)
 })()
 </script>`
 
@@ -936,247 +874,30 @@ function proxyToApp(req, res) {
   req.pipe(proxy)
 }
 
-// ── Web console HTML ─────────────────────────────────────────────────────────
+// ── Loading page (shown while building, auto-redirects when app is ready) ────
 const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Building ${PROJECT}...</title>
+<title>${PROJECT}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;background:#0d1117;color:#c9d1d9;font-family:'SF Mono','Fira Mono',Consolas,monospace;display:flex;flex-direction:column;overflow:hidden}
-.topbar{background:#161b22;border-bottom:1px solid #30363d;padding:10px 18px;display:flex;align-items:center;gap:8px;flex-shrink:0}
-.title{color:#8b949e;font-size:13px}
-.title b{color:#e6edf3}
-#timer{margin-left:auto;color:#484f58;font-size:12px}
-.statbar{background:#0d1117;border-bottom:1px solid #21262d;padding:6px 18px;display:flex;gap:24px;font-size:12px;color:#484f58;flex-shrink:0}
-.v{color:#79c0ff}
-#console{flex:1;overflow-y:auto;padding:14px 18px;font-size:12.5px;line-height:1.55}
-#console::-webkit-scrollbar{width:5px}
-#console::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
-.sf{color:#3fb950;font-weight:600}
-.ef{color:#21262d}
-.st{color:#58a6ff}
-.lg{color:#8b949e}
-.er{color:#f85149}
-.cd{color:#c9d1d9}
-.partial{color:#c9d1d9}
-.cursor{display:inline-block;width:7px;height:13px;background:#58a6ff;animation:bl .85s step-end infinite;vertical-align:middle;margin-left:1px}
-@keyframes bl{50%{opacity:0}}
-.footbar{background:#1f6feb;padding:7px 18px;font-size:12px;color:#fff;display:flex;justify-content:space-between;flex-shrink:0;transition:background .3s}
-.footbar.install{background:#9e6a03}
-.footbar.launch{background:#238636}
-.footbar.err{background:#da3633}
-.live{color:#58a6ff}
-.sp{display:inline-block;width:1.2ch;font-style:normal}
-.tok{color:#3fb950}
-.ter{color:#f85149}
+html,body{height:100%;background:#0f0f11;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:20px}
+.ring{width:44px;height:44px;border:3px solid #27272a;border-top-color:#6366f1;border-radius:50%;animation:sp .75s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.name{font-size:18px;font-weight:600;color:#fafafa}
+.phase{font-size:13px;color:#71717a;letter-spacing:.2px}
 </style>
 </head>
 <body>
-<div class="topbar">
-  <div class="title">Building <b>${PROJECT}</b></div>
-  <div id="timer">0s</div>
-</div>
-<div class="statbar">
-  <span>files: <span class="v" id="fc">0</span></span>
-  <span>phase: <span class="v" id="ph">generating</span></span>
-</div>
-<div id="console"></div>
-<div class="footbar" id="fb">
-  <span id="fb-left">DeepSeek is generating your app...</span>
-  <span>⚡ OpenRouter</span>
-</div>
+<div class="ring"></div>
+<div class="name">${PROJECT}</div>
+<div class="phase" id="ph">Starting…</div>
 <script>
-var con   = document.getElementById('console')
-var fcEl  = document.getElementById('fc')
-var phEl  = document.getElementById('ph')
-var fb    = document.getElementById('fb')
-var fbL   = document.getElementById('fb-left')
-var timer = document.getElementById('timer')
-
-var t0 = Date.now()
-setInterval(function() { timer.textContent = Math.round((Date.now()-t0)/1000)+'s' }, 1000)
-
-var buf = ''
-var partialEl = null
-var fileCount = 0
-
-var SPIN = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-var spinIdx = 0
-var spinTimer = null
-var liveEl = null
-var liveSpEl = null
-var liveTxtEl = null
-
-function setLive(label) {
-  if (!liveEl) {
-    liveEl    = document.createElement('div')
-    liveSpEl  = document.createElement('span')
-    liveTxtEl = document.createElement('span')
-    liveSpEl.className = 'sp'
-    liveEl.className   = 'live'
-    liveEl.appendChild(liveSpEl)
-    liveEl.appendChild(liveTxtEl)
-    con.appendChild(liveEl)
-  }
-  liveSpEl.textContent  = SPIN[0]
-  liveTxtEl.textContent = ' ' + label
-  liveEl.className      = 'live'
-  con.scrollTop = con.scrollHeight
-  if (!spinTimer) {
-    spinTimer = setInterval(function() {
-      if (liveSpEl) liveSpEl.textContent = SPIN[spinIdx++ % SPIN.length]
-    }, 80)
-  }
-}
-
-function finalizeLive(text, ok) {
-  if (spinTimer) { clearInterval(spinTimer); spinTimer = null; spinIdx = 0 }
-  if (liveEl) {
-    liveEl.className  = ok ? 'tok' : 'ter'
-    liveEl.textContent = text
-    liveEl = null; liveSpEl = null; liveTxtEl = null
-  } else {
-    appendLine(text, ok ? 'tok' : 'ter')
-  }
-  con.scrollTop = con.scrollHeight
-}
-
-function appendLine(text, cls) {
-  if (partialEl) { partialEl.remove(); partialEl = null }
-  var d = document.createElement('div')
-  d.className = cls || 'cd'
-  d.textContent = text
-  con.appendChild(d)
-  con.scrollTop = con.scrollHeight
-}
-
-function showPartial() {
-  if (!buf) return
-  if (partialEl) partialEl.remove()
-  partialEl = document.createElement('div')
-  partialEl.className = 'partial'
-  var txt = document.createTextNode(buf)
-  var cur = document.createElement('span')
-  cur.className = 'cursor'
-  partialEl.appendChild(txt)
-  partialEl.appendChild(cur)
-  con.appendChild(partialEl)
-  con.scrollTop = con.scrollHeight
-}
-
-function onChunk(text) {
-  buf += text
-  var lines = buf.split('\\n')
-  buf = lines.pop()
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i]
-    var cls = 'cd'
-    if (line.indexOf('--- FILE:') === 0)     cls = 'sf'
-    else if (line.indexOf('--- END FILE') === 0) cls = 'ef'
-    appendLine(line, cls)
-  }
-  showPartial()
-}
-
-function pollAndReload() {
-  fetch('/health').then(function(r) { return r.json() }).then(function(d) {
-    if (!d.loading) setTimeout(function() { window.location.reload() }, 1000)
-    else setTimeout(pollAndReload, 2000)
-  }).catch(function() {
-    setTimeout(pollAndReload, 2000)
-  })
-}
-
-// replaying = true while the server is sending the buffered history to this client.
-// We never auto-redirect during replay — only on live events — so visiting /console
-// manually after a build shows the history without immediately bouncing to /.
-var replaying = true
-
-var es = new EventSource('/events')
-es.onmessage = function(e) {
-  var d = JSON.parse(e.data)
-
-  // 'connected' is always sent AFTER the replay buffer — marks end of replay.
-  if (d.type === 'connected') {
-    replaying = false
-    // If build already finished before we connected, update phase label
-    if (d.state === 'running') { phEl.textContent = 'running'; fb.className = 'footbar launch'; fbL.textContent = 'App is live!' }
-    if (d.state === 'error')   { phEl.textContent = 'error';   fb.className = 'footbar err' }
-    return
-  }
-
-  if (d.type === 'thinking') {
-    setLive('Agent thinking...')
-
-  } else if (d.type === 'tool_start') {
-    var lbl = d.tool.replace(/_/g,' ') + (d.label ? '  ' + d.label : '')
-    setLive(lbl + '...')
-
-  } else if (d.type === 'tool_done') {
-    finalizeLive(d.icon + ' ' + d.text, d.ok)
-
-  } else if (d.type === 'status') {
-    appendLine('> ' + d.message, 'st')
-
-  } else if (d.type === 'chunk') {
-    onChunk(d.content)
-
-  } else if (d.type === 'file') {
-    fileCount++
-    fcEl.textContent = fileCount
-
-  } else if (d.type === 'phase') {
-    if (partialEl) { partialEl.remove(); partialEl = null }
-    appendLine('')
-    appendLine('── ' + d.message, 'st')
-    phEl.textContent = d.phase
-    if (d.phase === 'install') {
-      fb.className = 'footbar install'
-      fbL.textContent = 'Installing dependencies...'
-    } else if (d.phase === 'build') {
-      fbL.textContent = 'Building...'
-    } else if (d.phase === 'rebuilding' || d.phase === 'fixing') {
-      fb.className = 'footbar install'
-      fbL.textContent = 'AI is patching...'
-    }
-
-  } else if (d.type === 'log') {
-    var lines = d.content.split('\\n')
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i]) appendLine(lines[i], 'lg')
-    }
-
-  } else if (d.type === 'running') {
-    appendLine('')
-    appendLine('── ' + d.message, 'sf')
-    phEl.textContent = 'running'
-    fb.className = 'footbar launch'
-    fbL.textContent = 'App is live!'
-    if (!replaying) { es.close(); setTimeout(pollAndReload, 1000) }
-
-  } else if (d.type === 'launching') {
-    appendLine('')
-    appendLine('── ' + d.message, 'sf')
-    phEl.textContent = 'launching'
-    fb.className = 'footbar launch'
-    fbL.textContent = 'App is starting...'
-    if (!replaying) { es.close(); setTimeout(pollAndReload, 1500) }
-
-  } else if (d.type === 'error') {
-    if (partialEl) { partialEl.remove(); partialEl = null }
-    appendLine('')
-    appendLine('✗ ' + d.message, 'er')
-    phEl.textContent = 'error'
-    fb.className = 'footbar err'
-    fbL.textContent = '✗ Build failed'
-    es.close()
-  }
-}
-
-es.onerror = function() { es.close(); setTimeout(pollAndReload, 3000) }
+var LABELS={thinking:'Thinking…',editing:'Applying changes…',installing:'Installing packages…',building:'Building…',launching:'Launching…',running:'Ready',error:'Build failed'}
+function poll(){fetch('/health').then(function(r){return r.json()}).then(function(d){var ph=d.phase||d.state||'building';document.getElementById('ph').textContent=LABELS[ph]||ph;if(d.state==='running'){window.location.reload();return}if(d.state==='error'){return}setTimeout(poll,2000)}).catch(function(){setTimeout(poll,3000)})}
+poll()
 </script>
 </body>
 </html>`
@@ -1215,12 +936,6 @@ const server = http.createServer(function(req, res) {
       if (i >= 0) sseClients.splice(i, 1)
     })
     return
-  }
-
-  // ── /console (always shows build console) ──────────────────────────────────
-  if (url === '/console') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-    return res.end(HTML)
   }
 
   // ── /rebuild POST (HTTP rebuild trigger) ───────────────────────────────────
