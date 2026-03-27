@@ -585,6 +585,11 @@ async function runAgenticPatch(description, errorContext, attempt) {
   if (attempt === undefined) attempt = 0
   const isRetry = attempt > 0
 
+  // Reset to 'building' so pollUntilReady doesn't mistake the pre-launched boilerplate
+  // (state='running') for the finished customised app.
+  state = 'building'
+  currentPhase = 'thinking'
+
   const statusMsg = isRetry
     ? 'Agent fixing errors (attempt ' + (attempt + 1) + ')...'
     : 'Agent is analyzing the codebase...'
