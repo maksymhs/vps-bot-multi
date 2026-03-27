@@ -1107,19 +1107,24 @@ async function deployWithRetry(ctx, dir, userId, name, description, action, mode
   return false
 }
 
-async function sendProjectMessage(ctx, name, result) {
+async function sendProjectMessage(ctx, name, result, loadingMsg = null) {
   const { Markup } = await import('telegraf')
   const url = projectUrl(getUserId(ctx), name)
   const text = result === 'async'
     ? `🚀 *${name}*\n🌐 ${url}\n\n_Open the link — your app is building live inside the container._`
     : `✅ *${name}* is ready\n🔗 ${url}`
-  await ctx.reply(text, {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback('♻️ Rebuild', `rb:${name}`), Markup.button.callback('📋 Logs', `lg:${name}`)],
-      [Markup.button.callback('🔗 URL', `url:${name}`), Markup.button.callback('⬅️ List', 'list')],
-    ]),
-  })
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('♻️ Rebuild', `rb:${name}`), Markup.button.callback('📋 Logs', `lg:${name}`)],
+    [Markup.button.callback('🔗 URL', `url:${name}`), Markup.button.callback('⬅️ List', 'list')],
+  ])
+  if (loadingMsg) {
+    await ctx.telegram.editMessageText(
+      loadingMsg.chat.id, loadingMsg.message_id, null,
+      text, { parse_mode: 'Markdown', ...keyboard }
+    ).catch(() => ctx.reply(text, { parse_mode: 'Markdown', ...keyboard }))
+  } else {
+    await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard })
+  }
 }
 
 export async function deployNew(ctx, name, description, model = null) {
@@ -1127,10 +1132,13 @@ export async function deployNew(ctx, name, description, model = null) {
   const dir = userStore.projectDir(userId, name)
   mkdirSync(dir, { recursive: true })
   try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
+  const loadingMsg = await ctx.reply(`⏳ *${name}*\n_Starting build..._`, { parse_mode: 'Markdown' }).catch(() => null)
   const result = await deployWithRetry(ctx, dir, userId, name, description, 'new', model)
   if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
-    await sendProjectMessage(ctx, name, result)
+    await sendProjectMessage(ctx, name, result, loadingMsg)
+  } else if (loadingMsg) {
+    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {})
   }
   return result
 }
@@ -1150,10 +1158,13 @@ export async function deployRebuild(ctx, name, description, model = null, mode =
     }
   }
 
+  const loadingMsg = await ctx.reply(`⏳ *${name}*\n_Rebuilding..._`, { parse_mode: 'Markdown' }).catch(() => null)
   const result = await deployWithRetry(ctx, dir, userId, name, description, 'rebuild', model, mode)
   if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
-    await sendProjectMessage(ctx, name, result)
+    await sendProjectMessage(ctx, name, result, loadingMsg)
+  } else if (loadingMsg) {
+    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {})
   }
   return result
 }
