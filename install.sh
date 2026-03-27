@@ -270,6 +270,19 @@ else
     echo -e "  ${GREEN}✔${NC} ADMIN_USER_ID → ${ADMIN_USER_ID}"
 fi
 
+# REBUILD_SECRET — auto-generated once, never shown to user
+if ! grep -q "^REBUILD_SECRET=.\+" "${INSTALL_DIR}/.env" 2>/dev/null; then
+    _REBUILD_SECRET=$(openssl rand -hex 16 2>/dev/null || tr -dc 'a-f0-9' < /dev/urandom | head -c 32)
+    if grep -q "^REBUILD_SECRET=" "${INSTALL_DIR}/.env"; then
+        sed -i "s|^REBUILD_SECRET=.*|REBUILD_SECRET=${_REBUILD_SECRET}|" "${INSTALL_DIR}/.env"
+    else
+        echo "REBUILD_SECRET=${_REBUILD_SECRET}" >> "${INSTALL_DIR}/.env"
+    fi
+    echo -e "  ${GREEN}✔${NC} REBUILD_SECRET generated"
+else
+    echo -e "  ${GREEN}✔${NC} REBUILD_SECRET"
+fi
+
 # Re-source .env with new values
 source "${INSTALL_DIR}/.env" 2>/dev/null || true
 
