@@ -496,6 +496,11 @@ bot.launch()
 reconcileSleepState().catch(err => console.error('Reconcile error:', err.message))
 startSleepManager()
 ensureBaseImage().catch(err => console.error('[base-image] error:', err.message))
+
+// Graceful shutdown — stop polling then force exit so systemd restart is instant
+const shutdown = (sig) => { bot.stop(sig); setTimeout(() => process.exit(0), 1500) }
+process.once('SIGTERM', () => shutdown('SIGTERM'))
+process.once('SIGINT',  () => shutdown('SIGINT'))
 console.log(getBanner())
 
 // Check OpenRouter API key at startup

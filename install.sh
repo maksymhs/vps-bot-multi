@@ -382,7 +382,8 @@ Type=simple
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${NODE_BIN} src/bot.js
 Restart=always
-RestartSec=10
+RestartSec=5
+TimeoutStopSec=5
 EnvironmentFile=${INSTALL_DIR}/.env
 Environment=HOME=$HOME
 
