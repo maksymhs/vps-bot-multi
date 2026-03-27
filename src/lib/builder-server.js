@@ -429,6 +429,7 @@ async function runAgenticPatch(description) {
   ]
 
   for (let iter = 0; iter < AGENT_MAX_ITERS; iter++) {
+    broadcast({ type: 'thinking' })
     let response
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -473,49 +474,54 @@ async function runAgenticPatch(description) {
       let result = ''
 
       if (call.function.name === 'list_files') {
+        broadcast({ type: 'tool_start', tool: 'list_files', label: '' })
         const files = getWorkspaceFiles()
         result = files.join('\n')
-        broadcast({ type: 'log', content: '📂 list_files → ' + files.length + ' files\n' })
+        broadcast({ type: 'tool_done', icon: '📂', text: 'list_files → ' + files.length + ' files', ok: true })
 
       } else if (call.function.name === 'read_file') {
+        broadcast({ type: 'tool_start', tool: 'read_file', label: args.path })
         try {
           const raw = fs.readFileSync(path.join(WORKSPACE, args.path), 'utf8')
           result = raw.slice(0, 8000)
-          broadcast({ type: 'log', content: '📖 read  ' + args.path + '\n' })
+          broadcast({ type: 'tool_done', icon: '📖', text: 'read  ' + args.path, ok: true })
         } catch (err) {
           result = 'Error: ' + err.message
-          broadcast({ type: 'log', content: '❌ read  ' + args.path + ': ' + err.message + '\n' })
+          broadcast({ type: 'tool_done', icon: '❌', text: 'read  ' + args.path + ': ' + err.message, ok: false })
         }
 
       } else if (call.function.name === 'edit_file') {
+        broadcast({ type: 'tool_start', tool: 'edit_file', label: args.path })
         const fname = path.basename(args.path || '')
         if (PROTECTED.has(fname)) {
           result = 'Error: file is protected, cannot edit'
-          broadcast({ type: 'log', content: '🚫 edit  ' + args.path + ' (protected)\n' })
+          broadcast({ type: 'tool_done', icon: '🚫', text: 'edit  ' + args.path + ' (protected)', ok: false })
         } else {
           try {
             const filePath = path.join(WORKSPACE, args.path)
             const content  = fs.readFileSync(filePath, 'utf8')
             if (!content.includes(args.old_string)) {
               result = 'Error: old_string not found verbatim. Call read_file again to get the exact current content.'
-              broadcast({ type: 'log', content: '❌ edit  ' + args.path + ': string not found\n' })
+              broadcast({ type: 'tool_done', icon: '❌', text: 'edit  ' + args.path + ': string not found', ok: false })
             } else {
               fs.writeFileSync(filePath, content.replace(args.old_string, args.new_string))
               filesWritten++
               broadcast({ type: 'file', name: args.path })
-              broadcast({ type: 'log', content: '✏️  edit  ' + args.path + '\n' })
+              broadcast({ type: 'tool_done', icon: '✏️', text: 'edit  ' + args.path, ok: true })
               result = 'OK'
             }
           } catch (err) {
             result = 'Error: ' + err.message
-            broadcast({ type: 'log', content: '❌ edit  ' + args.path + ': ' + err.message + '\n' })
+            broadcast({ type: 'tool_done', icon: '❌', text: 'edit  ' + args.path + ': ' + err.message, ok: false })
           }
         }
 
       } else if (call.function.name === 'write_file') {
+        broadcast({ type: 'tool_start', tool: 'write_file', label: args.path })
         const fname = path.basename(args.path || '')
         if (PROTECTED.has(fname)) {
           result = 'Error: file is protected'
+          broadcast({ type: 'tool_done', icon: '🚫', text: 'write ' + args.path + ' (protected)', ok: false })
         } else {
           try {
             const filePath = path.join(WORKSPACE, args.path)
@@ -523,10 +529,11 @@ async function runAgenticPatch(description) {
             fs.writeFileSync(filePath, args.content)
             filesWritten++
             broadcast({ type: 'file', name: args.path })
-            broadcast({ type: 'log', content: '📝 write ' + args.path + '\n' })
+            broadcast({ type: 'tool_done', icon: '📝', text: 'write ' + args.path, ok: true })
             result = 'OK'
           } catch (err) {
             result = 'Error: ' + err.message
+            broadcast({ type: 'tool_done', icon: '❌', text: 'write ' + args.path + ': ' + err.message, ok: false })
           }
         }
       } else {
@@ -639,6 +646,10 @@ html,body{height:100%;background:#0d1117;color:#c9d1d9;font-family:'SF Mono','Fi
 .footbar.install{background:#9e6a03}
 .footbar.launch{background:#238636}
 .footbar.err{background:#da3633}
+.live{color:#58a6ff}
+.sp{display:inline-block;width:1.2ch;font-style:normal}
+.tok{color:#3fb950}
+.ter{color:#f85149}
 </style>
 </head>
 <body>
@@ -674,6 +685,47 @@ setInterval(function() { timer.textContent = Math.round((Date.now()-t0)/1000)+'s
 var buf = ''
 var partialEl = null
 var fileCount = 0
+
+var SPIN = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+var spinIdx = 0
+var spinTimer = null
+var liveEl = null
+var liveSpEl = null
+var liveTxtEl = null
+
+function setLive(label) {
+  if (!liveEl) {
+    liveEl    = document.createElement('div')
+    liveSpEl  = document.createElement('span')
+    liveTxtEl = document.createElement('span')
+    liveSpEl.className = 'sp'
+    liveEl.className   = 'live'
+    liveEl.appendChild(liveSpEl)
+    liveEl.appendChild(liveTxtEl)
+    con.appendChild(liveEl)
+  }
+  liveSpEl.textContent  = SPIN[0]
+  liveTxtEl.textContent = ' ' + label
+  liveEl.className      = 'live'
+  con.scrollTop = con.scrollHeight
+  if (!spinTimer) {
+    spinTimer = setInterval(function() {
+      if (liveSpEl) liveSpEl.textContent = SPIN[spinIdx++ % SPIN.length]
+    }, 80)
+  }
+}
+
+function finalizeLive(text, ok) {
+  if (spinTimer) { clearInterval(spinTimer); spinTimer = null; spinIdx = 0 }
+  if (liveEl) {
+    liveEl.className  = ok ? 'tok' : 'ter'
+    liveEl.textContent = text
+    liveEl = null; liveSpEl = null; liveTxtEl = null
+  } else {
+    appendLine(text, ok ? 'tok' : 'ter')
+  }
+  con.scrollTop = con.scrollHeight
+}
 
 function appendLine(text, cls) {
   if (partialEl) { partialEl.remove(); partialEl = null }
@@ -725,7 +777,17 @@ var es = new EventSource('/events')
 es.onmessage = function(e) {
   var d = JSON.parse(e.data)
 
-  if (d.type === 'status') {
+  if (d.type === 'thinking') {
+    setLive('Agent thinking...')
+
+  } else if (d.type === 'tool_start') {
+    var lbl = d.tool.replace(/_/g,' ') + (d.label ? '  ' + d.label : '')
+    setLive(lbl + '...')
+
+  } else if (d.type === 'tool_done') {
+    finalizeLive(d.icon + ' ' + d.text, d.ok)
+
+  } else if (d.type === 'status') {
     appendLine('> ' + d.message, 'st')
 
   } else if (d.type === 'chunk') {
