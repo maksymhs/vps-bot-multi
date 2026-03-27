@@ -30,9 +30,13 @@
     ├── reads .build-config.json → picks mode (patch | generate)
     │
     ├── [template match — mode: patch]
-    │   └── agentic tool loop (up to 14 iterations):
-    │         list_files → read_file → edit_file / write_file
-    │         AI edits boilerplate surgically, can't hallucinate paths
+    │   ├── FAST PATH: plan+execute (1 API call)
+    │   │     all files loaded into context → DeepSeek returns JSON plan
+    │   │     { edits: [{file,old,new}], creates: [{file,content}] }
+    │   │     → apply all changes instantly, no more API calls
+    │   │
+    │   └── FALLBACK: agentic tool loop (if plan fails)
+    │         list_files → read_file → edit_file / write_file (up to 14 iters)
     │
     └── [no template — mode: generate]
         └── calls DeepSeek V3 via OpenRouter (streaming)
@@ -92,11 +96,12 @@ chmod 600 ~/.vpsbot
 
 ## Features
 
-- **Live build console** — watch the AI edit your app in real time via a terminal-style web UI (SSE stream)
+- **Live build console** — animated spinner per tool call, watch the AI edit your app in real time (SSE stream)
+- **Plan+Execute** — single API call with all files in context → JSON plan → all edits applied instantly (~5-10s vs 20-60s)
+- **Agentic tool loop** — fallback if plan fails: `read_file` / `edit_file` / `write_file` tools, can't hallucinate file contents
+- **Self-healing** — build errors and runtime crashes feed back to the agent automatically (up to 2 fix attempts)
 - **Permanent proxy architecture** — builder-server.js stays alive on :3000 forever; app runs on :3001 internally
-- **Agentic patch loop** — AI uses `read_file` / `edit_file` / `write_file` tools to modify code surgically (Claude Code style), can't hallucinate file contents
 - **Instant HTTP rebuild** — `/rebuild` POST to the running container, no Docker restart whatsoever
-- **Auto-crash fix** — quick crashes (<6s) trigger an automatic DeepSeek patch with the error log as context
 - **Loading → URL** — Telegram shows ⏳ immediately, edits in-place to the live URL when ready
 - **Watch Live button** — opens the `/console` SSE stream directly from Telegram while a patch runs
 - **Docker layer caching** — `npm install` layer cached when `package.json` unchanged between builds
@@ -132,11 +137,12 @@ Each project runs in a single Docker container. `builder-server.js` is a **perma
 │                                                          │
 │  BUILD PHASE — builder-server.js                         │
 │    serves /console + /events (SSE) on :3000              │
-│    → agentic tool loop (patch mode)                      │
+│    → plan+execute: 1 call, all files → JSON edits        │
+│      fallback: tool loop (read/edit/write, ≤14 iters)    │
 │      or streaming generation (generate mode)             │
 │    → npm install  (cached / skipped if unchanged)        │
-│    → npm run build (if needed)                           │
-│    → spawns real app on :3001                            │
+│    → npm run build (errors → agent fixes → retry)        │
+│    → spawn app :3001 (crash → agent fixes → retry)       │
 │                                                          │
 │  RUNNING PHASE                                           │
 │    :3000 proxies all traffic → :3001                     │
@@ -158,14 +164,16 @@ Bot POSTs to https://john-kanban.yourdomain.com/rebuild
   X-Rebuild-Secret: <shared secret>
   │
   ▼
-builder-server.js kills app process → agentic patch loop:
-  AI calls read_file("src/App.jsx")
-  AI calls edit_file(old_string, new_string)   ← exact string replacement
-  npm install (skipped if package.json same)
-  spawn app on :3001
+builder-server.js kills app process → plan+execute:
+  all files loaded into context → 1 DeepSeek call
+  → JSON plan: [{file, old, new}, ...]
+  → apply all edits instantly
+  → npm install (skipped if package.json same)
+  → npm run build → if error: agent fixes + retries
+  → spawn app on :3001 → if crash: agent fixes + retries
   │
   ▼
-Watch Live button → /console shows changes as they happen
+Watch Live button → /console shows animated spinner per step
 Browser auto-reloads → updated app live in seconds
 ```
 
@@ -293,10 +301,13 @@ REBUILD_SECRET=<hex secret>            # shared between bot and containers
                    ▼
             builder-server.js (permanent proxy :3000)
                    │
-          ┌────────┴──────────────┐
-          │                       │
-     agentic tool loop       real app (:3001)
-     (patch mode)            proxied from :3000
+          ┌────────┴──────────────────┐
+          │                           │
+     plan+execute               real app (:3001)
+     (1 API call, all files)    proxied from :3000
+     fallback: tool loop
+     self-healing: build/crash
+     errors → agent fixes
           │
      OpenRouter API
      (DeepSeek V3, cloud)
