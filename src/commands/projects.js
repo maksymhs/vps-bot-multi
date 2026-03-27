@@ -1211,7 +1211,7 @@ export const changeQueue = new Map()  // String(userId) → [{description, input
 
 // Progress bar helpers for Telegram build status messages
 const PHASE_STEPS = { starting: 0, thinking: 2, editing: 4, installing: 6, building: 8, launching: 9, running: 10 }
-function buildProgressText(name, url, phase) {
+function buildProgressText(name, url, phase, userInput) {
   const n = PHASE_STEPS[phase] ?? 1
   const bar = '▓'.repeat(n) + '░'.repeat(10 - n)
   const label = phase === 'thinking'   ? 'Agent thinking...'
@@ -1220,6 +1220,10 @@ function buildProgressText(name, url, phase) {
     : phase === 'building'   ? 'Building...'
     : phase === 'launching'  ? 'Launching...'
     : 'Starting...'
+  // Compact variant for conversational changes — no URL, just the progress bar
+  if (userInput) {
+    return `🔨 *${name}* — _"${userInput.slice(0, 55)}"_\n\`${bar}\` ${label}`
+  }
   return `⏳ *${name}*\nRebuilding...\n\n\`${bar}\` ${label}\n\n[👁 Watch live](${url}/console)`
 }
 
@@ -1254,29 +1258,42 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
       if (phase !== lastPhase && data.state !== 'running' && data.state !== 'error') {
         lastPhase = phase
         const { Markup } = await import('telegraf')
+        const progressKeyboard = userInput
+          ? []  // no button needed for conversational changes — already compact
+          : [[Markup.button.url('👁 Watch Live', url + '/console')]]
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
-          buildProgressText(name, url, phase),
-          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.url('👁 Watch Live', url + '/console')]]) }
+          buildProgressText(name, url, phase, userInput),
+          { parse_mode: 'Markdown', ...Markup.inlineKeyboard(progressKeyboard) }
         ).catch(() => {})
       }
 
       if (data.state === 'running') {
-        // Build complete — show completion message with applied change
         const { Markup } = await import('telegraf')
-        const appliedLine = userInput ? `\n_Applied: "${userInput.slice(0, 80)}"_` : ''
-        const completionText =
-          `✅ *${name}* is ready\n🔗 ${url}${appliedLine}\n\n_Type your next change directly in the chat._`
+        let completionText, completionKeyboard
+
+        if (userInput) {
+          // Conversational change — compact: no URL, just confirmation + hint
+          completionText =
+            `✅ _"${userInput.slice(0, 70)}"_ applied to *${name}*\n\n` +
+            `_Visible on the web now. Keep typing changes._`
+          completionKeyboard = Markup.inlineKeyboard([
+            [Markup.button.url('🔗 Open app', url), Markup.button.callback('📋 Logs', `lg:${name}`)],
+          ])
+        } else {
+          // Menu-triggered rebuild or new project — full message with URL
+          completionText =
+            `✅ *${name}* is ready\n🔗 ${url}\n\n_Type your next change directly in the chat._`
+          completionKeyboard = Markup.inlineKeyboard([
+            [Markup.button.url('🔗 Open', url), Markup.button.callback('♻️ Rebuild', `rb:${name}`)],
+            [Markup.button.callback('📋 Logs', `lg:${name}`), Markup.button.callback('⬅️ List', 'list')],
+          ])
+        }
+
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
           completionText,
-          {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-              [Markup.button.url('🔗 Open', url), Markup.button.callback('♻️ Rebuild', `rb:${name}`)],
-              [Markup.button.callback('📋 Logs', `lg:${name}`), Markup.button.callback('⬅️ List', 'list')],
-            ]),
-          }
+          { parse_mode: 'Markdown', ...completionKeyboard }
         ).catch(() => {})
 
         // Process any change queued while this build was running
@@ -1338,11 +1355,16 @@ export async function deployRebuild(ctx, name, description, model = null, mode =
     }
   }
 
-  const loadingMsg = await ctx.reply(`⏳ *${name}*\n_Rebuilding..._`, { parse_mode: 'Markdown' }).catch(() => null)
+  // Conversational changes get a compact one-liner; menu rebuilds get the full message
+  const initialText = userInput
+    ? `🔨 _"${userInput.slice(0, 60)}"_ — applying to *${name}*...`
+    : `⏳ *${name}*\n_Rebuilding..._`
+  const loadingMsg = await ctx.reply(initialText, { parse_mode: 'Markdown' }).catch(() => null)
   const result = await deployWithRetry(ctx, dir, userId, name, description, 'rebuild', model, mode)
   if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
-    await sendProjectMessage(ctx, name, result, loadingMsg, mode)
+    // For conversational changes, skip sendProjectMessage — pollUntilReady owns the message
+    if (!userInput) await sendProjectMessage(ctx, name, result, loadingMsg, mode)
     if (result === 'async') pollUntilReady(ctx, userId, name, loadingMsg, userInput)
   } else if (loadingMsg) {
     await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {})
