@@ -65,10 +65,6 @@ export const config = {
   // Build concurrency
   get maxConcurrentBuilds() { return parseInt(process.env.MAX_CONCURRENT_BUILDS ?? '2') },
 
-  // Templates
-  get templatesRepo() { return process.env.TEMPLATES_REPO ?? 'https://github.com/maksymhs/vps-bot-templates.git' },
-  get templatesDir() { return process.env.TEMPLATES_DIR ?? '/root/vps-bot-templates' },
-
   // Auto-sleep: forced 30 minutes for multi-user
   get idleTimeout() { return parseInt(process.env.IDLE_TIMEOUT ?? '30') },
 

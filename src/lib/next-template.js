@@ -1,119 +1,66 @@
 /**
- * Built-in Next.js 14 + React 18 + Tailwind CSS boilerplate.
+ * next-template.js
  *
- * copyNextTemplate(dir) writes the scaffold to disk and returns the list
- * of relative file paths that were written.  The AI only needs to
- * customise the files it actually changes (patch mode).
+ * Copies the built-in Next.js 14 + React 18 + Tailwind CSS boilerplate
+ * (stored in templates/next-react/ inside this repo) to the target project
+ * directory, then provides the AI prompt so it only outputs what changes.
+ *
+ * No external git repo. No matching logic. One template for everything.
  */
 
-import { mkdirSync, writeFileSync } from 'fs'
-import { join, dirname } from 'path'
+import { cpSync, readdirSync, statSync } from 'fs'
+import { join, relative, dirname } from 'path'
+import { fileURLToPath } from 'url'
 
-// ── boilerplate files ──────────────────────────────────────────────────────
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
-const FILES = {
-  'package.json': JSON.stringify({
-    name: 'app',
-    version: '0.1.0',
-    private: true,
-    scripts: {
-      start: 'next dev -p ${PORT:-3000}',
-      build: 'next build',
-    },
-    dependencies: {
-      next: '14.2.5',
-      react: '^18',
-      'react-dom': '^18',
-    },
-    devDependencies: {
-      tailwindcss: '^3',
-      autoprefixer: '^10',
-      postcss: '^8',
-    },
-  }, null, 2),
+// Physical template folder: <repo-root>/templates/next-react/
+const TEMPLATE_DIR = join(__dirname, '../../templates/next-react')
 
-  'next.config.mjs': `/** @type {import('next').NextConfig} */
-const nextConfig = {
-  reactStrictMode: true,
-}
-export default nextConfig
-`,
+// ── file helpers ───────────────────────────────────────────────────────────
 
-  'tailwind.config.js': `/** @type {import('tailwindcss').Config} */
-module.exports = {
-  content: ['./app/**/*.{js,jsx,ts,tsx}', './components/**/*.{js,jsx,ts,tsx}'],
-  theme: { extend: {} },
-  plugins: [],
-}
-`,
-
-  'postcss.config.js': `module.exports = {
-  plugins: { tailwindcss: {}, autoprefixer: {} },
-}
-`,
-
-  'app/globals.css': `@tailwind base;
-@tailwind components;
-@tailwind utilities;
-`,
-
-  'app/layout.jsx': `import './globals.css'
-
-export const metadata = { title: 'App', description: 'Powered by vps-bot' }
-
-export default function RootLayout({ children }) {
-  return (
-    <html lang="en">
-      <body className="bg-gray-50 text-gray-900 min-h-screen">{children}</body>
-    </html>
-  )
-}
-`,
-
-  'app/page.jsx': `export default function Home() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-8">
-      <h1 className="text-4xl font-bold mb-4">Hello from vps-bot</h1>
-      <p className="text-gray-500">Edit app/page.jsx to get started.</p>
-    </main>
-  )
-}
-`,
-
-  'app/api/health/route.js': `export async function GET() {
-  return Response.json({ status: 'ok' })
-}
-`,
+/** Recursively collect all relative file paths inside a directory. */
+function listFiles(dir, base = dir) {
+  const entries = readdirSync(dir, { withFileTypes: true })
+  const files = []
+  for (const e of entries) {
+    const full = join(dir, e.name)
+    if (e.isDirectory()) {
+      files.push(...listFiles(full, base))
+    } else if (e.name !== '.gitkeep') {
+      files.push(relative(base, full))
+    }
+  }
+  return files
 }
 
 // ── public API ─────────────────────────────────────────────────────────────
 
 /**
- * Write the Next.js boilerplate into `dir`.
- * Returns the list of relative file paths written.
+ * Copy the Next.js template into `destDir`.
+ * Returns the list of relative file paths that were written.
  */
-export function copyNextTemplate(dir) {
-  const written = []
-  for (const [rel, content] of Object.entries(FILES)) {
-    const abs = join(dir, rel)
-    mkdirSync(dirname(abs), { recursive: true })
-    writeFileSync(abs, content, 'utf8')
-    written.push(rel)
-  }
-  return written
+export function copyNextTemplate(destDir) {
+  cpSync(TEMPLATE_DIR, destDir, { recursive: true })
+  return listFiles(TEMPLATE_DIR)
 }
 
-// ── prompt helpers ─────────────────────────────────────────────────────────
+// ── AI prompt ──────────────────────────────────────────────────────────────
 
-/** Files the AI should never re-output (infrastructure handled separately). */
-export const NEXT_SKIP_OUTPUT = new Set([
+/** Files the AI must never re-generate (infrastructure handled separately). */
+const SKIP_OUTPUT = [
   'Dockerfile', 'docker-compose.yml', 'builder-server.js',
-  '.dockerignore', '.gitignore', '.build-prompt.txt', '.build-system-prompt.txt', '.build-config.json',
-])
+  '.dockerignore', '.gitignore', '.build-prompt.txt',
+  '.build-system-prompt.txt', '.build-config.json',
+]
 
 /**
- * Build the AI prompt for customising the Next.js template.
- * `boilerplateFiles` is the array returned by copyNextTemplate().
+ * Build the prompt for the AI to customise the Next.js template.
+ *
+ * @param {string}   name            - project slug
+ * @param {string}   description     - user's request
+ * @param {string[]} boilerplateFiles - list returned by copyNextTemplate()
+ * @param {string|null} errorContext - previous build error, if any
  */
 export function buildNextPrompt(name, description, boilerplateFiles, errorContext = null) {
   const fileList = boilerplateFiles.map(f => `  - ${f}`).join('\n')
@@ -122,23 +69,24 @@ export function buildNextPrompt(name, description, boilerplateFiles, errorContex
     `You are customising a Next.js 14 + React 18 + Tailwind CSS boilerplate for the following request.\n\n` +
     `App name: ${name}\n` +
     `User request: ${description}\n\n` +
-    `BOILERPLATE FILES ALREADY ON DISK (DO NOT reproduce unchanged):\n${fileList}\n\n` +
-    `TECH STACK RULES:\n` +
-    `• Next.js 14 App Router (app/ directory). No pages/ directory.\n` +
-    `• All UI components use Tailwind CSS only — no external component libraries unless the user explicitly asks.\n` +
-    `• Add "use client" only for components that need browser APIs or event handlers.\n` +
-    `• Keep app/api/health/route.js returning { status: "ok" } — do not delete or break it.\n` +
-    `• package.json scripts.start must stay as "next dev -p \${PORT:-3000}".\n` +
-    `• ALWAYS output package.json (update the name field to "${name}").\n` +
-    `• Do NOT output: ${[...NEXT_SKIP_OUTPUT].join(', ')}\n\n` +
+    `BOILERPLATE ALREADY ON DISK (do NOT reproduce these files unless they must change):\n` +
+    `${fileList}\n\n` +
+    `STACK RULES:\n` +
+    `• Use Next.js 14 App Router (app/ directory). No pages/ directory.\n` +
+    `• Style exclusively with Tailwind CSS utility classes. No external UI libraries unless the user explicitly asks.\n` +
+    `• Add "use client" only when the component needs browser APIs or event handlers.\n` +
+    `• Keep app/api/health/route.js returning { status: "ok" } — never delete or modify it.\n` +
+    `• Keep package.json scripts.start as "next dev -p \${PORT:-3000}".\n` +
+    `• ALWAYS output package.json (set the name field to "${name}" and add any new deps).\n` +
+    `• Do NOT output: ${SKIP_OUTPUT.join(', ')}\n\n` +
     `OUTPUT RULES:\n` +
-    `• Output ONLY the files that differ from the boilerplate for this specific request.\n` +
-    `• Create new components inside app/ or components/ as needed.\n` +
-    `• Use modern, visually appealing design with Tailwind utility classes.\n` +
-    `• ASCII only in JS/JSX. No explanations outside code blocks.`
+    `• Output ONLY the files that are different from the boilerplate for this specific request.\n` +
+    `• Put new React components in app/ or components/ as appropriate.\n` +
+    `• Design must be modern, visually polished, and mobile-responsive.\n` +
+    `• ASCII characters only inside JS/JSX. No explanations outside code blocks.`
 
   if (errorContext) {
-    prompt += `\n\n⚠️ STARTUP ERROR TO FIX:\n${errorContext.slice(0, 1200)}`
+    prompt += `\n\n⚠️ PREVIOUS BUILD ERROR — analyse and fix:\n${errorContext.slice(0, 1200)}`
   }
 
   return prompt
