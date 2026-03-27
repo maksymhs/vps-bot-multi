@@ -1,16 +1,23 @@
-// builder-server.js — runs INSIDE the Docker container
-// Flow: serve web console → call DeepSeek → write files → npm install → npm build → spawn app
+// builder-server.js — runs INSIDE the Docker container (permanent proxy + AI builder)
+// Architecture:
+//   Port 3000 (public) — builder-server.js always alive: serves console, handles /rebuild, proxies to app
+//   Port 3001 (internal) — real app spawned here after build
+//
+// Flow: serve console → DeepSeek → write files → npm install → npm build → spawn app on 3001
+//       On /rebuild: kill app → DeepSeek patch → npm install → respawn on 3001
 // Uses only Node.js built-ins + global fetch (Node 18+). No external deps.
 import http from 'http'
 import fs   from 'fs'
 import path from 'path'
 import cp   from 'child_process'
 
-const WORKSPACE = process.env.WORKSPACE_DIR || '/app'
-const PORT      = 3000
-const OR_KEY    = process.env.OPENROUTER_API_KEY || ''
-const PROJECT   = process.env.PROJECT_NAME       || 'app'
-const MODEL     = process.env.MODEL              || 'deepseek/deepseek-chat-v3-0324'
+const WORKSPACE      = process.env.WORKSPACE_DIR    || '/app'
+const PORT           = 3000          // builder always listens here (public)
+const APP_PORT       = 3001          // real app runs here (internal)
+const OR_KEY         = process.env.OPENROUTER_API_KEY || ''
+const PROJECT        = process.env.PROJECT_NAME       || 'app'
+const MODEL          = process.env.MODEL              || 'deepseek/deepseek-chat-v3-0324'
+const REBUILD_SECRET = process.env.REBUILD_SECRET     || ''
 
 // Files the AI must not overwrite
 const PROTECTED = new Set([
@@ -18,19 +25,20 @@ const PROTECTED = new Set([
   'docker-compose.yml', 'Dockerfile',
 ])
 
-// ── State ──────────────────────────────────────────────────────────────────
-let state        = 'building'   // 'building' | 'installing' | 'error'
+// ── State ───────────────────────────────────────────────────────────────────
+let state        = 'building'  // 'building' | 'installing' | 'running' | 'error'
 let buildError   = null
 let filesWritten = 0
+let currentApp   = null        // child process for the running app
 const sseClients = []
 
-// ── SSE helpers ────────────────────────────────────────────────────────────
+// ── SSE helpers ─────────────────────────────────────────────────────────────
 function broadcast(obj) {
   const msg = 'data: ' + JSON.stringify(obj) + '\n\n'
   for (const res of sseClients) try { res.write(msg) } catch {}
 }
 
-// ── File writer ────────────────────────────────────────────────────────────
+// ── File writer ─────────────────────────────────────────────────────────────
 let currentFile  = null
 let contentLines = []
 
@@ -62,7 +70,7 @@ function processLine(line) {
   if (currentFile !== null) contentLines.push(line)
 }
 
-// ── Spawn helper: streams stdout+stderr to SSE as 'log' events ─────────────
+// ── Spawn helper: streams stdout+stderr to SSE as 'log' events ──────────────
 function spawnStreaming(cmd, args) {
   return new Promise(function(resolve, reject) {
     const child = cp.spawn(cmd, args, { cwd: WORKSPACE, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -76,7 +84,7 @@ function spawnStreaming(cmd, args) {
   })
 }
 
-// ── Error handler ──────────────────────────────────────────────────────────
+// ── Error handler ────────────────────────────────────────────────────────────
 function fail(msg) {
   state      = 'error'
   buildError = msg
@@ -85,20 +93,89 @@ function fail(msg) {
   console.error('[builder] error:', msg)
 }
 
-const MAX_AUTOFIX = 1   // auto-patch retries on quick startup crash
+// ── App spawn: runs on APP_PORT, detects quick startup crashes ───────────────
+// Returns: error string if app crashed quickly, undefined if stable
+const CRASH_WINDOW_MS = 6000
+function spawnApp(bin, args) {
+  return new Promise(function(resolve) {
+    let errorOutput = ''
+    const startedAt = Date.now()
 
-// ── Main pipeline: generate → install → build → launch ────────────────────
-// errorContext: runtime error string from a previous crash (null on first run)
-// Returns: error string if app crashed quickly (caller should retry), else undefined
+    currentApp = cp.spawn(bin, args, {
+      cwd:      WORKSPACE,
+      env:      Object.assign({}, process.env, { PORT: String(APP_PORT) }),
+      stdio:    ['ignore', 'pipe', 'pipe'],
+      detached: false,
+    })
+    state = 'running'
+
+    currentApp.stdout.on('data', function(d) { process.stdout.write(d); errorOutput += d.toString() })
+    currentApp.stderr.on('data', function(d) { process.stderr.write(d); errorOutput += d.toString() })
+
+    currentApp.on('error', function(err) {
+      currentApp = null
+      state = 'building'
+      resolve(err.message)
+    })
+
+    currentApp.on('exit', function(code, signal) {
+      currentApp = null
+      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+        // Intentionally killed for rebuild — don't exit the process
+        resolve(undefined)
+        return
+      }
+      const quickCrash = code !== 0 && (Date.now() - startedAt) < CRASH_WINDOW_MS
+      if (quickCrash) {
+        state = 'building'
+        resolve(errorOutput.slice(-1500))
+      } else {
+        process.exit(code || 0)
+      }
+    })
+  })
+}
+
+// ── Enumerate workspace files for patch context ──────────────────────────────
+function getWorkspaceFiles() {
+  const result = []
+  const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.vite'])
+  function walk(dir, rel) {
+    let entries
+    try { entries = fs.readdirSync(dir) } catch { return }
+    for (const e of entries) {
+      if (e.startsWith('.') && e !== '.env') continue
+      if (SKIP_DIRS.has(e)) continue
+      const full = path.join(dir, e)
+      const relPath = rel ? rel + '/' + e : e
+      try {
+        if (fs.statSync(full).isDirectory()) walk(full, relPath)
+        else result.push(relPath)
+      } catch {}
+    }
+  }
+  walk(WORKSPACE, '')
+  return result
+}
+
+// ── Main pipeline: generate → install → build → launch ──────────────────────
+// errorContext: runtime error from previous crash (null on first run)
+// Returns: error string if app crashed quickly, undefined if stable (process.exit handled internally)
 async function runAll(errorContext) {
-  // ── 1. Read prompts ───────────────────────────────────────────────────────
+  // Reset per-run state
+  filesWritten = 0
+  currentFile  = null
+  contentLines = []
+
+  // ── 1. Read prompts ─────────────────────────────────────────────────────────
   broadcast({ type: 'status', message: errorContext ? 'AI is patching the error...' : 'Reading build prompt...' })
   let prompt, systemPrompt
   try {
     prompt       = fs.readFileSync(path.join(WORKSPACE, '.build-prompt.txt'), 'utf8')
     systemPrompt = fs.readFileSync(path.join(WORKSPACE, '.build-system-prompt.txt'), 'utf8')
   } catch (err) {
-    return fail('Cannot read prompt: ' + err.message)
+    fail('Cannot read prompt: ' + err.message)
+    return
   }
 
   // Append runtime error context so DeepSeek knows what to fix
@@ -110,7 +187,7 @@ async function runAll(errorContext) {
   let pkgJsonBefore = ''
   try { pkgJsonBefore = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
 
-  // ── 2. Call DeepSeek via OpenRouter ──────────────────────────────────────
+  // ── 2. Call DeepSeek via OpenRouter ─────────────────────────────────────────
   let maxTokens = 14000
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, '.build-config.json'), 'utf8'))
@@ -141,7 +218,8 @@ async function runAll(errorContext) {
 
     if (!res.ok) {
       const txt = await res.text()
-      return fail('OpenRouter ' + res.status + ': ' + txt.slice(0, 300))
+      fail('OpenRouter ' + res.status + ': ' + txt.slice(0, 300))
+      return
     }
 
     broadcast({ type: 'status', message: 'Generating files...' })
@@ -177,10 +255,11 @@ async function runAll(errorContext) {
     commitFile()
     console.log('[builder] generation done —', filesWritten, 'files')
   } catch (err) {
-    return fail(err.message)
+    fail(err.message)
+    return
   }
 
-  // ── 3. npm install (skip if package.json unchanged — deps already in image) ─
+  // ── 3. npm install (skip if package.json unchanged — deps already in image) ──
   state = 'installing'
   let pkgJsonAfter = ''
   try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
@@ -191,13 +270,14 @@ async function runAll(errorContext) {
     try {
       await spawnStreaming('npm', ['install'])
     } catch (err) {
-      return fail('npm install failed: ' + err.message)
+      fail('npm install failed: ' + err.message)
+      return
     }
   } else {
     broadcast({ type: 'phase', phase: 'install', message: 'Dependencies up to date, skipping install...' })
   }
 
-  // ── 4. npm run build (optional) ───────────────────────────────────────────
+  // ── 4. npm run build (optional) ─────────────────────────────────────────────
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
     if (pkg.scripts && pkg.scripts.build) {
@@ -206,7 +286,7 @@ async function runAll(errorContext) {
     }
   } catch {}
 
-  // ── 5. Resolve start command ──────────────────────────────────────────────
+  // ── 5. Resolve start command ─────────────────────────────────────────────────
   let startBin  = 'node'
   let startArgs = ['src/index.js']
   try {
@@ -217,38 +297,98 @@ async function runAll(errorContext) {
     startArgs = parts.slice(1)
   } catch {}
 
-  // ── 6. Signal browser, close server, spawn app ────────────────────────────
+  // ── 6. Launch app on APP_PORT (builder stays alive as proxy on PORT) ─────────
   broadcast({ type: 'launching', message: 'Launching app...' })
-  console.log('[builder] launching:', startBin, startArgs.join(' '))
+  console.log('[builder] launching:', startBin, startArgs.join(' '), 'on port', APP_PORT)
 
-  // Returns error string if app crashes within CRASH_WINDOW_MS, else process.exit()
-  const CRASH_WINDOW_MS = 6000
-  const crashError = await new Promise(function(resolve) {
-    server.close(function() {
-      setTimeout(function() {
-        let errorOutput = ''
-        const startedAt = Date.now()
-        const app = cp.spawn(startBin, startArgs, {
-          cwd:      WORKSPACE,
-          stdio:    ['ignore', 'pipe', 'pipe'],
-          detached: false,
-        })
-        app.stdout.on('data', function(d) { process.stdout.write(d); errorOutput += d.toString() })
-        app.stderr.on('data', function(d) { process.stderr.write(d); errorOutput += d.toString() })
-        app.on('error', function(err) { resolve(err.message) })
-        app.on('exit',  function(code) {
-          const quickCrash = code !== 0 && (Date.now() - startedAt) < CRASH_WINDOW_MS
-          if (quickCrash) resolve(errorOutput.slice(-1500))
-          else process.exit(code || 0)
-        })
-      }, 300)
-    })
-  })
-
-  return crashError   // signals caller to retry with this error as context
+  return await spawnApp(startBin, startArgs)
 }
 
-// ── Web console HTML ───────────────────────────────────────────────────────
+const MAX_AUTOFIX = 1
+
+async function runWithAutofix() {
+  let errorContext = null
+  for (let attempt = 1; attempt <= 1 + MAX_AUTOFIX; attempt++) {
+    if (attempt > 1) {
+      console.log('[builder] auto-fix attempt', attempt)
+      state = 'building'
+      buildError = null
+      broadcast({ type: 'phase', phase: 'fixing', message: 'App crashed — AI is patching...' })
+    }
+    errorContext = await runAll(errorContext)
+    if (!errorContext) break
+  }
+  if (errorContext) {
+    fail('App failed to start after auto-fix:\n' + errorContext.slice(-600))
+  }
+}
+
+// ── In-container rebuild triggered via HTTP ──────────────────────────────────
+async function startRebuild(description) {
+  console.log('[builder] HTTP rebuild triggered:', description)
+
+  // Kill running app
+  if (currentApp) {
+    currentApp.kill('SIGTERM')
+    currentApp = null
+  }
+
+  // Build patch prompt from current workspace files
+  const files = getWorkspaceFiles()
+  const fileList = files.map(f => '  - ' + f).join('\n')
+  let systemPrompt = ''
+  try { systemPrompt = fs.readFileSync(path.join(WORKSPACE, '.build-system-prompt.txt'), 'utf8') } catch {}
+
+  const prompt =
+    'Modify the existing application "' + PROJECT + '".\n\n' +
+    'REQUESTED CHANGES:\n' + description + '\n\n' +
+    'EXISTING FILES IN /app:\n' + fileList + '\n\n' +
+    'RULES:\n' +
+    '1. Output ONLY files that need to change for this request\n' +
+    '2. Keep GET /health → { status: "ok" }\n' +
+    '3. Keep the existing file structure\n' +
+    '4. App MUST use process.env.PORT || 3000 (it will be set to 3001 internally)\n' +
+    '5. ASCII only. No explanations outside code.'
+
+  fs.writeFileSync(path.join(WORKSPACE, '.build-prompt.txt'), prompt)
+  if (systemPrompt) {
+    // Reduce max tokens for patch operations
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, '.build-config.json'), 'utf8'))
+      cfg.maxTokens = 6000
+      fs.writeFileSync(path.join(WORKSPACE, '.build-config.json'), JSON.stringify(cfg))
+    } catch {}
+  }
+
+  state = 'building'
+  buildError = null
+  filesWritten = 0
+  broadcast({ type: 'phase', phase: 'rebuilding', message: 'Rebuilding with AI...' })
+
+  runWithAutofix()
+}
+
+// ── Proxy to app running on APP_PORT ─────────────────────────────────────────
+function proxyToApp(req, res) {
+  const options = {
+    hostname: '127.0.0.1',
+    port:     APP_PORT,
+    path:     req.url || '/',
+    method:   req.method,
+    headers:  Object.assign({}, req.headers, { host: 'localhost:' + APP_PORT }),
+  }
+  const proxy = http.request(options, function(proxyRes) {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers)
+    proxyRes.pipe(res)
+  })
+  proxy.on('error', function() {
+    res.writeHead(502, { 'Content-Type': 'text/plain' })
+    res.end('App not ready yet')
+  })
+  req.pipe(proxy)
+}
+
+// ── Web console HTML ─────────────────────────────────────────────────────────
 const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -361,8 +501,7 @@ function pollAndReload() {
     if (!d.loading) setTimeout(function() { location.reload() }, 1000)
     else setTimeout(pollAndReload, 2000)
   }).catch(function() {
-    // server closed — app is starting up
-    setTimeout(function() { location.reload() }, 2000)
+    setTimeout(pollAndReload, 2000)
   })
 }
 
@@ -390,14 +529,25 @@ es.onmessage = function(e) {
       fbL.textContent = 'Installing dependencies...'
     } else if (d.phase === 'build') {
       fbL.textContent = 'Building...'
+    } else if (d.phase === 'rebuilding' || d.phase === 'fixing') {
+      fb.className = 'footbar install'
+      fbL.textContent = 'AI is patching...'
     }
 
   } else if (d.type === 'log') {
-    // npm install / build output — split by newline
     var lines = d.content.split('\\n')
     for (var i = 0; i < lines.length; i++) {
       if (lines[i]) appendLine(lines[i], 'lg')
     }
+
+  } else if (d.type === 'running') {
+    appendLine('')
+    appendLine('── ' + d.message, 'sf')
+    phEl.textContent = 'running'
+    fb.className = 'footbar launch'
+    fbL.textContent = 'App is live!'
+    es.close()
+    setTimeout(pollAndReload, 1000)
 
   } else if (d.type === 'launching') {
     appendLine('')
@@ -424,19 +574,22 @@ es.onerror = function() { es.close(); setTimeout(pollAndReload, 3000) }
 </body>
 </html>`
 
-// ── HTTP server ────────────────────────────────────────────────────────────
+// ── HTTP server ──────────────────────────────────────────────────────────────
 const server = http.createServer(function(req, res) {
   const url = req.url ? req.url.split('?')[0] : '/'
 
+  // ── /health ────────────────────────────────────────────────────────────────
   if (url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     return res.end(JSON.stringify({
       status:  buildError ? 'error' : 'ok',
-      loading: state !== 'error',
+      loading: state !== 'running' && state !== 'error',
+      state,
       error:   buildError,
     }))
   }
 
+  // ── /events (SSE) ──────────────────────────────────────────────────────────
   if (url === '/events') {
     res.writeHead(200, {
       'Content-Type':  'text/event-stream',
@@ -453,27 +606,47 @@ const server = http.createServer(function(req, res) {
     return
   }
 
+  // ── /console (always shows build console) ──────────────────────────────────
+  if (url === '/console') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    return res.end(HTML)
+  }
+
+  // ── /rebuild POST (HTTP rebuild trigger) ───────────────────────────────────
+  if (url === '/rebuild' && req.method === 'POST') {
+    if (REBUILD_SECRET && req.headers['x-rebuild-secret'] !== REBUILD_SECRET) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: 'Forbidden' }))
+    }
+    if (state === 'building' || state === 'installing') {
+      res.writeHead(409, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: 'Build already in progress' }))
+    }
+    let body = ''
+    req.on('data', function(d) { body += d })
+    req.on('end', function() {
+      try {
+        const { description } = JSON.parse(body)
+        if (!description) throw new Error('description required')
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, message: 'Rebuild started' }))
+        setImmediate(function() { startRebuild(description) })
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: err.message }))
+      }
+    })
+    return
+  }
+
+  // ── Proxy to app when running, console otherwise ───────────────────────────
+  if (state === 'running') {
+    return proxyToApp(req, res)
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
   res.end(HTML)
 })
-
-async function runWithAutofix() {
-  let errorContext = null
-  for (let attempt = 1; attempt <= 1 + MAX_AUTOFIX; attempt++) {
-    if (attempt > 1) {
-      console.log('[builder] auto-fix attempt', attempt)
-      await new Promise(r => setTimeout(r, 600))        // wait for port to free
-      await new Promise(r => server.listen(PORT, r))    // reopen builder console
-      state = 'building'; buildError = null; filesWritten = 0
-      broadcast({ type: 'phase', phase: 'fixing', message: 'App crashed — AI is patching...' })
-    }
-    errorContext = await runAll(errorContext)
-    if (!errorContext) break                             // stable exit handled inside runAll
-  }
-  if (errorContext) {
-    fail('App failed to start after auto-fix:\n' + errorContext.slice(-600))
-  }
-}
 
 server.listen(PORT, function() {
   console.log('[builder] server on :' + PORT + '  project=' + PROJECT)

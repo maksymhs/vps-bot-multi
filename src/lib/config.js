@@ -59,6 +59,9 @@ export const config = {
   // OpenRouter API key (DeepSeek model)
   get openrouterKey() { return process.env.OPENROUTER_API_KEY || undefined },
 
+  // Rebuild secret — shared between bot and containers to authenticate /rebuild requests
+  get rebuildSecret() { return process.env.REBUILD_SECRET || '' },
+
   // Build concurrency
   get maxConcurrentBuilds() { return parseInt(process.env.MAX_CONCURRENT_BUILDS ?? '2') },
 

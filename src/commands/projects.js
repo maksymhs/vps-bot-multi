@@ -200,6 +200,7 @@ function writeBuilderComposeFile(dir, userId, name) {
     environment:
       - OPENROUTER_API_KEY=${config.openrouterKey || ''}
       - PROJECT_NAME=${name}
+      - REBUILD_SECRET=${config.rebuildSecret}
     networks:
       - caddy
     labels:
@@ -228,6 +229,7 @@ networks:
     environment:
       - OPENROUTER_API_KEY=${config.openrouterKey || ''}
       - PROJECT_NAME=${name}
+      - REBUILD_SECRET=${config.rebuildSecret}
     ports:
       - "${port}:3000"
     healthcheck:
@@ -267,6 +269,25 @@ function followContainerLogs(containerFullName, logName) {
 // Start the builder container (fire-and-forget).
 // The container handles generation → npm install → npm build → app launch internally.
 // Returns 'async' on success (caller skips Phase 3), false if container failed to start.
+// ── Fast HTTP rebuild: sends description to running container, no Docker needed ──
+async function rebuildViaHttp(url, description) {
+  if (!config.rebuildSecret) return false
+  try {
+    const res = await fetch(url + '/rebuild', {
+      method:  'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'X-Rebuild-Secret':  config.rebuildSecret,
+      },
+      body:   JSON.stringify({ description }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus, buildConfig = {}) {
   // ── Sync latest files from running container → host dir ──────────────────
   // On patch/rebuild, the AI previously modified files inside the container.
@@ -1018,14 +1039,25 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
 
   // ── Builder container for patch / full-rebuild / new without template ──────
   if (!builderResult && config.openrouterKey) {
-    let prompt
     if (mode === 'patch') {
-      const existingFiles = getExistingFiles(dir)
-      prompt = buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
+      // Try fast HTTP rebuild first (no Docker, no container restart)
+      const url = projectUrl(userId, name)
+      log.build(logName, `Attempting HTTP rebuild → ${url}`)
+      const ok = await rebuildViaHttp(url, description)
+      if (ok) {
+        log.build(logName, 'HTTP rebuild accepted by container')
+        builderResult = 'async'
+      } else {
+        // Container not reachable — fall back to full Docker rebuild
+        log.build(logName, 'HTTP rebuild failed, falling back to Docker rebuild')
+        const existingFiles = getExistingFiles(dir)
+        const prompt = buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
+        builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
+      }
     } else {
-      prompt = buildClaudePrompt(name, description, errorContext, null)
+      const prompt = buildClaudePrompt(name, description, errorContext, null)
+      builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
     }
-    builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
   }
 
   // ── Builder is self-managing: generation → install → launch inside container ─
