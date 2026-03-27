@@ -971,7 +971,7 @@ function onChunk(text) {
 
 function pollAndReload() {
   fetch('/health').then(function(r) { return r.json() }).then(function(d) {
-    if (!d.loading) setTimeout(function() { location.reload() }, 1000)
+    if (!d.loading) setTimeout(function() { window.location.href = '/' }, 1000)
     else setTimeout(pollAndReload, 2000)
   }).catch(function() {
     setTimeout(pollAndReload, 2000)
