@@ -23,7 +23,7 @@
    │
    ▼
   Docker builds image (npm install layer cached) → container starts
-   │                                                   ⏳ edited to 🚀 URL in Telegram
+   │
    ▼
   builder-server.js runs inside container (permanent proxy on :3000):
     ├── serves live web console + SSE log stream
@@ -71,7 +71,7 @@ Going back to `/console` later shows the full replay of the last build (SSE repl
 
 ### Live browser sync (zero interaction)
 
-Every HTML page served by the proxy has a tiny watcher script injected. When a rebuild fires from Telegram the open browser tab switches on its own:
+Every HTML page served by the proxy has a tiny overlay panel injected. When a rebuild fires from Telegram, the open browser tab shows a live build console slide-up without any redirect:
 
 ```
 app open in browser
@@ -81,12 +81,11 @@ user sends change from Telegram
   │
 state = 'building'
   ↓
-browser auto-redirects → /console   ← no click needed
-  │ (SSE replay shows full history)
+slide-up panel appears → live SSE stream (spinner per tool call)
   │
 build completes → state = 'running'
   ↓
-browser auto-reloads → updated app  ← no click needed
+panel hides → page reloads in-place with updated app  ← no click needed
 ```
 
 ---
@@ -138,12 +137,16 @@ chmod 600 ~/.vpsbot
 - **Self-healing** — build errors and runtime crashes feed back to the agent automatically (up to 2 fix attempts)
 - **Permanent proxy architecture** — builder-server.js stays alive on :3000 forever; app runs on :3001 internally
 - **Instant HTTP rebuild** — `/rebuild` POST to the running container, no Docker restart whatsoever
-- **Full lifecycle in one message** — ⏳ → 🚀 Watch Live → ✅ ready (single message edited in-place, no spam)
-- **Completion notification** — background poll on `/health`; edits to ✅ (or ❌) when build finishes
-- **Watch Live button** — opens the `/console` SSE stream directly from Telegram (on both new builds and rebuilds)
+- **Conversational changes** — just type what you want changed; no menus needed after first deploy
+- **Live progress bar** — Telegram message updates in-place as build moves through phases (`thinking → editing → installing → building → launching`)
+- **Change queue** — send the next change before the current build finishes; applied automatically when ready
+- **Compact completion message** — shows what was applied, no URL spam, just type the next change
+- **Full lifecycle in one message** — ⏳ → progress bar → ✅ (single message edited in-place, no spam)
+- **Watch Live button** — opens the `/console` SSE stream directly from Telegram
+- **Overlay build panel** — slide-up panel in the browser shows live build progress without navigating away
 - **Instant boilerplate** — for no-build templates (static, express) the app is live at the URL from second one while the agent customises in background
 - **Console-first links** — Telegram links directly to `/console`; browser auto-redirects to the app when done; `/console` replays full build history on revisit
-- **Auto browser sync** — injected watcher redirects open tab to console on rebuild, reloads app when done; zero clicks needed
+- **Auto browser sync** — injected watcher shows overlay on rebuild, reloads app when done; zero clicks needed
 - **Docker layer caching** — `npm install` layer cached when `package.json` unchanged between builds
 - **npm install skip** — skipped entirely if `package.json` didn't change during generation
 - **Auto-registration** — users created automatically on first `/start`
@@ -178,6 +181,7 @@ Each project runs in a single Docker container. `builder-server.js` is a **perma
 │  BUILD PHASE — builder-server.js                         │
 │    serves /console + /events (SSE) on :3000              │
 │    SSE replay buffer (300 events) + heartbeat every 4s   │
+│    /health exposes current phase for Telegram progress   │
 │    → plan+execute: 1 call, all files → JSON edits        │
 │      fallback: tool loop (read/edit/write, ≤14 iters)    │
 │      or streaming generation (generate mode)             │
@@ -186,9 +190,9 @@ Each project runs in a single Docker container. `builder-server.js` is a **perma
 │    → spawn app :3001 (crash → agent fixes → retry)       │
 │                                                          │
 │  RUNNING PHASE                                           │
-│    :3000 proxies HTML → injects REBUILD_WATCHER script   │
-│      polls /health 2s → auto-redirect to /console        │
-│      on rebuild; auto-reload to / when done              │
+│    :3000 proxies HTML → injects overlay watcher script   │
+│      polls /health 2s → shows slide-up build panel       │
+│      on rebuild; auto-hides + reloads when done          │
 │    no-build templates: boilerplate live before agent     │
 │    /rebuild POST → kills app, reruns build phase         │
 │    /console → SSE live log always available              │
@@ -217,13 +221,15 @@ builder-server.js kills app process → plan+execute:
   → spawn app on :3001 → if crash: agent fixes + retries
   │
   ▼
-Watch Live button → /console shows animated spinner per step
-Browser auto-reloads → updated app live in seconds
+Telegram message updates with live progress bar
+Browser overlay shows build steps → reloads app when done
 ```
 
 ---
 
 ## Telegram UX
+
+### New project
 
 The bot edits a single message in-place through the whole lifecycle — no message spam:
 
@@ -233,51 +239,65 @@ The bot edits a single message in-place through the whole lifecycle — no messa
         ↓ (Docker up ~2s)
 🚀 my-kanban
 🌐 https://my-kanban.yourdomain.com
-App is building live — tap Watch Live to follow progress.
-[👁 Watch Live]  [♻️ Rebuild]  [📋 Logs]  [🔗 URL]
+Boilerplate is live — tap to watch the agent customise it.
+[👁 Watch Build]  [♻️ Rebuild]  [📋 Logs]  [🔗 URL]
         ↓ (build completes, ~30-90s)
 ✅ my-kanban is ready
 🔗 https://my-kanban.yourdomain.com
-[♻️ Rebuild]  [📋 Logs]  [🔗 URL]  [⬅️ List]
-```
-
-**After rebuild (with progress bar):**
-```
-⏳ my-kanban
-   Rebuilding...
-        ↓
-⏳ my-kanban
-Rebuilding...
-
-▓▓░░░░░░░░ Agent thinking...
-[👁 Watch Live]
-        ↓
-⏳ my-kanban
-Rebuilding...
-
-▓▓▓▓░░░░░░ Applying changes...
-[👁 Watch Live]
-        ↓
-✅ my-kanban is ready
-🔗 https://my-kanban.yourdomain.com
-Applied: "change the button color"
 
 Type your next change directly in the chat.
 [🔗 Open]  [♻️ Rebuild]  [📋 Logs]  [⬅️ List]
 ```
 
-The progress bar updates live as the build moves through phases: `thinking → editing → installing → building → launching`.
-Each phase change edits the message in-place — no spam.
+### Conversational changes (just type)
 
-**Change queuing:**
-If you send another change while a build is in progress, it's queued automatically:
-```
-📝 my-kanban is building — change queued (1 pending).
-Will apply automatically when done.
-```
-As soon as the current build finishes, the queued change starts immediately.
+After the first deploy, type changes directly — no menus, no buttons:
 
-> **Tip:** keep the app open in a browser tab. When you send any change from Telegram the tab switches to the live console automatically and reloads to the updated app when done — no manual refresh ever needed.
+```
+You:  change the header color to blue
+Bot:  🔨 "change the header color to blue" — applying to my-kanban...
+         ↓ (progress bar updates as phases advance)
+      🔨 my-kanban — "change the header color to blue"
+      ▓▓▓▓░░░░░░ Applying changes...
+         ↓ (done ~10-30s)
+      ✅ "change the header color to blue" applied to my-kanban
+
+      Already visible on the web. Keep typing changes or use the menu.
+      [🔗 Open app]  [📋 Logs]  [⬅️ Menu]
+
+You:  now make the font bigger
+Bot:  🔨 "now make the font bigger" — applying to my-kanban...
+      ...
+```
+
+No URL repeated on every change. No menu between changes. Just a natural conversation.
+
+### Change queuing
+
+Send the next change before the current build finishes — it queues automatically:
+
+```
+You:  change button color          ← build starts
+You:  also round the corners       ← build still running
+Bot:  📝 my-kanban is building — change queued (1 pending).
+      Will apply automatically when done.
+                                   ← first build completes → ✅
+                                   ← second change fires automatically
+```
+
+### Live progress bar
+
+The Telegram message updates in-place as the build advances through phases:
+
+```
+▓▓░░░░░░░░ Agent thinking...
+▓▓▓▓░░░░░░ Applying changes...
+▓▓▓▓▓▓░░░░ Installing deps...
+▓▓▓▓▓▓▓▓░░ Building...
+▓▓▓▓▓▓▓▓▓░ Launching...
+```
+
+> **Tip:** keep the app open in a browser tab. When you send any change from Telegram an overlay panel slides up with live build steps and disappears when the updated app is ready — zero clicks needed.
 
 ### Commands
 
@@ -384,8 +404,8 @@ REBUILD_SECRET=<hex secret>            # shared between bot and containers
           │                           │
      plan+execute               real app (:3001)
      (1 API call, all files)    proxied from :3000
-     fallback: tool loop
-     self-healing: build/crash
+     fallback: tool loop        overlay watcher injected
+     self-healing: build/crash  into every HTML page
      errors → agent fixes
           │
      OpenRouter API
@@ -432,7 +452,7 @@ vps-bot-multi/
 │       ├── user-store.js       # Per-user project store
 │       ├── docker-client.js    # Dockerode singleton
 │       ├── sleep-manager.js    # Auto-sleep + wake proxy
-│       ├── build-state.js      # In-progress build tracking
+│       ├── build-state.js      # Build + poll tracking (buildingSet, pollingSet)
 │       ├── build-queue.js      # Concurrency limiter
 │       ├── logger.js           # Centralized file logging
 │       ├── templates.js        # Template sync, matching & boilerplate
