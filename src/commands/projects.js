@@ -1232,16 +1232,19 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
 // Progress bar helpers for Telegram build status messages
 const PHASE_STEPS = { starting: 1, thinking: 3, editing: 5, installing: 7, building: 8, launching: 9, running: 10 }
 const PHASE_LABEL = { thinking: 'Agent thinking', editing: 'Applying changes', installing: 'Installing deps', building: 'Building', launching: 'Launching', starting: 'Starting' }
-const SPINNER_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+// Visible dot-pulse animation that works in all Telegram clients
+const DOTS = ['   ','·  ','·· ','···']
+// Escape special chars for Telegram MarkdownV2
+function mdv2(s) { return String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&') }
 function buildProgressText(name, url, phase, userInput, tick) {
   const n = PHASE_STEPS[phase] ?? 1
   const bar = '▓'.repeat(n) + '░'.repeat(10 - n)
-  const spin = SPINNER_FRAMES[(tick || 0) % SPINNER_FRAMES.length]
+  const dots = DOTS[(tick || 0) % DOTS.length]
   const label = PHASE_LABEL[phase] || 'Working'
   if (userInput) {
-    return `🔨 *${name}* — _"${userInput.slice(0, 55)}"_\n\`${bar}\` ${spin} ${label}...\n[🌐 Watch live](${url})`
+    return `🔨 *${mdv2(name)}* — _"${mdv2(userInput.slice(0, 55))}"_\n\`${bar}\` ${label}${dots}\n[🌐 Watch live](${url})`
   }
-  return `⏳ *${name}*\n\`${bar}\` ${spin} ${label}...\n[🌐 Watch live](${url})`
+  return `⏳ *${mdv2(name)}*\n\`${bar}\` ${label}${dots}\n[🌐 Watch live](${url})`
 }
 
 // Poll container /health in background; update Telegram message with progress bar,
@@ -1273,15 +1276,15 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
       const data = await resp.json()
       const phase = data.phase || data.state || 'starting'
 
-      // Update every tick so the spinner animates (Telegram ignores edits with identical text)
+      // Update every tick so the animation advances (dots change each poll)
       if (data.state !== 'running' && data.state !== 'error') {
         tick++
         const { Markup } = await import('telegraf')
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
           buildProgressText(name, url, phase, userInput, tick),
-          { parse_mode: 'Markdown', disable_web_page_preview: true, ...Markup.inlineKeyboard([]) }
-        ).catch(() => {})
+          { parse_mode: 'MarkdownV2', link_preview_options: { is_disabled: true }, ...Markup.inlineKeyboard([]) }
+        ).catch(e => { if (!String(e).includes('not modified')) console.error('[poll] editMsg:', e.message) })
       }
 
       if (data.state === 'running') {

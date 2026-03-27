@@ -175,10 +175,18 @@ function spawnApp(bin, args) {
       }
     })
 
-    // Wait until the app is actually accepting connections before declaring it running
-    waitForPort(APP_PORT, 30000).then(function(ok) {
-      if (settled) return   // already failed (crash/error)
+    // Wait until the app is actually accepting connections, then warm up the first page
+    // so the browser doesn't get a blank compile-wait when it reloads.
+    waitForPort(APP_PORT, 30000).then(async function(ok) {
+      if (settled) return
       if (!ok) { settle('Timed out waiting for app to listen on port ' + APP_PORT); return }
+      // Pre-compile the root route so the first browser request is instant
+      try {
+        const ctrl = new AbortController()
+        setTimeout(() => ctrl.abort(), 15000)
+        await fetch('http://127.0.0.1:' + APP_PORT + '/', { signal: ctrl.signal })
+      } catch {}
+      if (settled) return
       state = 'running'
       currentPhase = 'running'
       broadcast({ type: 'ready', state: 'running' })  // tells loading page / watcher to reload
