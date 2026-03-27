@@ -768,18 +768,54 @@ async function startRebuild(description) {
   runAgenticPatch(description)
 }
 
+// Script injected into every HTML page served by the proxy.
+// Polls /health every 2s; when a rebuild starts it redirects automatically to /console.
+// /console already auto-reloads the app when the build finishes — zero user interaction needed.
+const REBUILD_WATCHER = '<script>' +
+'(function(){' +
+'function chk(){' +
+'fetch("/health").then(function(r){return r.json()}).then(function(d){' +
+'if(d.state==="building"||d.state==="installing"){window.location.href="/console";return}' +
+'setTimeout(chk,2000)' +
+'}).catch(function(){setTimeout(chk,3000)})' +
+'}' +
+'setTimeout(chk,2000)' +
+'})()' +
+'</script>'
+
 // ── Proxy to app running on APP_PORT ─────────────────────────────────────────
 function proxyToApp(req, res) {
+  // Strip accept-encoding so we receive plain text we can modify for HTML injection
+  const fwdHeaders = Object.assign({}, req.headers, { host: 'localhost:' + APP_PORT })
+  delete fwdHeaders['accept-encoding']
+
   const options = {
     hostname: '127.0.0.1',
     port:     APP_PORT,
     path:     req.url || '/',
     method:   req.method,
-    headers:  Object.assign({}, req.headers, { host: 'localhost:' + APP_PORT }),
+    headers:  fwdHeaders,
   }
   const proxy = http.request(options, function(proxyRes) {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers)
-    proxyRes.pipe(res)
+    const ct = proxyRes.headers['content-type'] || ''
+    if (ct.includes('text/html')) {
+      // Buffer HTML so we can inject the rebuild-watcher script
+      const chunks = []
+      proxyRes.on('data', function(c) { chunks.push(c) })
+      proxyRes.on('end', function() {
+        let body = Buffer.concat(chunks).toString('utf8')
+        body = body.includes('</body>')
+          ? body.replace('</body>', REBUILD_WATCHER + '</body>')
+          : body + REBUILD_WATCHER
+        const outHeaders = Object.assign({}, proxyRes.headers)
+        delete outHeaders['content-length']   // length changed after injection
+        res.writeHead(proxyRes.statusCode, outHeaders)
+        res.end(body)
+      })
+    } else {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers)
+      proxyRes.pipe(res)
+    }
   })
   proxy.on('error', function() {
     res.writeHead(502, { 'Content-Type': 'text/plain' })
