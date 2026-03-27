@@ -304,7 +304,10 @@ async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus,
   // Write builder artifacts (overwrite whatever was synced)
   writeFileSync(join(dir, '.build-prompt.txt'), prompt)
   writeFileSync(join(dir, '.build-system-prompt.txt'), SYSTEM_PROMPT)
-  writeFileSync(join(dir, '.build-config.json'), JSON.stringify({ maxTokens: buildConfig.maxTokens || 14000 }))
+  writeFileSync(join(dir, '.build-config.json'), JSON.stringify({
+    mode:      buildConfig.mode || 'generate',
+    maxTokens: buildConfig.maxTokens || 14000,
+  }))
   writeFileSync(join(dir, 'builder-server.js'), BUILDER_SERVER_JS)
   writeFileSync(join(dir, 'Dockerfile'), BUILDER_DOCKERFILE)
   writeFileSync(join(dir, '.dockerignore'), '.git\nnode_modules\n*.md\n.env\n')
@@ -1026,8 +1029,8 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
           userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
           log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
 
-          const prompt = buildClaudePrompt(name, description, errorContext, templateInfo, dir)
-          builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus, { maxTokens: 8000 })
+          // Template is already deployed — use agentic agent to customize surgically
+          builderResult = await runBuilderContainer(dir, userId, name, description, logName, onStatus, { mode: 'patch' })
         }
       } else {
         log.info(`[${logName}] no template matched, using generic build`)

@@ -307,6 +307,22 @@ async function runAll(errorContext) {
 const MAX_AUTOFIX = 1
 
 async function runWithAutofix() {
+  // Check build mode: 'patch' = agentic tool loop, 'generate' = streaming text
+  let mode = 'generate'
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, '.build-config.json'), 'utf8'))
+    mode = cfg.mode || 'generate'
+  } catch {}
+
+  if (mode === 'patch') {
+    // Template builds and HTTP rebuilds both use the agentic agent
+    let description = ''
+    try { description = fs.readFileSync(path.join(WORKSPACE, '.build-prompt.txt'), 'utf8') } catch {}
+    await runAgenticPatch(description)
+    return
+  }
+
+  // mode === 'generate': no template matched, full file generation
   let errorContext = null
   for (let attempt = 1; attempt <= 1 + MAX_AUTOFIX; attempt++) {
     if (attempt > 1) {
