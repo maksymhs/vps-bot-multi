@@ -14,7 +14,7 @@ const MODEL     = process.env.MODEL              || 'deepseek/deepseek-chat-v3-0
 
 // Files the AI must not overwrite
 const PROTECTED = new Set([
-  'builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt',
+  'builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt', '.build-config.json',
   'docker-compose.yml', 'Dockerfile',
 ])
 
@@ -111,8 +111,14 @@ async function runAll(errorContext) {
   try { pkgJsonBefore = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
 
   // ── 2. Call DeepSeek via OpenRouter ──────────────────────────────────────
+  let maxTokens = 14000
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, '.build-config.json'), 'utf8'))
+    if (cfg.maxTokens) maxTokens = cfg.maxTokens
+  } catch {}
+
   broadcast({ type: 'status', message: 'Calling DeepSeek...' })
-  console.log('[builder] model:', MODEL)
+  console.log('[builder] model:', MODEL, 'max_tokens:', maxTokens)
   try {
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -128,7 +134,7 @@ async function runAll(errorContext) {
           { role: 'system', content: systemPrompt },
           { role: 'user',   content: prompt },
         ],
-        max_tokens: 16384,
+        max_tokens: maxTokens,
         stream:     true,
       }),
     })

@@ -49,7 +49,7 @@ For multi-stage Vite builds Stage 2 MUST include node_modules — use exactly th
   EXPOSE 3000
   CMD ["npm", "start"]
 TOOLKIT FILES: Files listed with a [component-name] prefix are pre-built toolkit files. Do NOT rewrite or output them — only output application files that need to change.
-Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
+Do NOT include explanations, comments outside code, or markdown fences. Output ONLY the files specified in the task. Every file must use this exact format.`
 
 function getUserId(ctx) {
   return ctx.from?.id
@@ -267,7 +267,7 @@ function followContainerLogs(containerFullName, logName) {
 // Start the builder container (fire-and-forget).
 // The container handles generation → npm install → npm build → app launch internally.
 // Returns 'async' on success (caller skips Phase 3), false if container failed to start.
-async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus) {
+async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus, buildConfig = {}) {
   // ── Sync latest files from running container → host dir ──────────────────
   // On patch/rebuild, the AI previously modified files inside the container.
   // The host dir may have stale template files. Sync before the new build so
@@ -283,6 +283,7 @@ async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
   // Write builder artifacts (overwrite whatever was synced)
   writeFileSync(join(dir, '.build-prompt.txt'), prompt)
   writeFileSync(join(dir, '.build-system-prompt.txt'), SYSTEM_PROMPT)
+  writeFileSync(join(dir, '.build-config.json'), JSON.stringify({ maxTokens: buildConfig.maxTokens || 14000 }))
   writeFileSync(join(dir, 'builder-server.js'), BUILDER_SERVER_JS)
   writeFileSync(join(dir, 'Dockerfile'), BUILDER_DOCKERFILE)
   writeFileSync(join(dir, '.dockerignore'), '.git\nnode_modules\n*.md\n.env\n')
@@ -327,10 +328,10 @@ async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
   return 'async'
 }
 
-function buildClaudePrompt(name, description, errorContext = null, templateInfo = null) {
+function buildClaudePrompt(name, description, errorContext = null, templateInfo = null, dir = null) {
   // If we have a matched template, use template-aware prompt
   if (templateInfo) {
-    return buildTemplatePrompt(name, description, templateInfo, errorContext)
+    return buildTemplatePrompt(name, description, templateInfo, errorContext, dir)
   }
 
   const base =
@@ -362,42 +363,68 @@ function buildClaudePrompt(name, description, errorContext = null, templateInfo 
   return base + `\n\n⚠️ FIX: The previous attempt failed with this error. Analyze and fix the code:\n${errorContext}`
 }
 
-function buildTemplatePrompt(name, description, templateInfo, errorContext = null) {
+// Files the AI should never output for template builds (handled by the builder infrastructure)
+const TEMPLATE_SKIP_OUTPUT = new Set([
+  'Dockerfile', 'docker-compose.yml', 'builder-server.js',
+  '.dockerignore', '.gitignore', '.build-prompt.txt', '.build-system-prompt.txt', '.build-config.json',
+  'vite.config.js', 'vite.config.ts', 'main.jsx', 'main.tsx', 'main.js',
+])
+// Files to skip when reading boilerplate contents (large or binary)
+const TEMPLATE_SKIP_READ = new Set([
+  'Dockerfile', 'docker-compose.yml', 'builder-server.js', '.dockerignore', '.gitignore',
+  '.build-prompt.txt', '.build-system-prompt.txt', '.build-config.json', 'package-lock.json',
+])
+const BOILERPLATE_MAX_FILE_CHARS = 6000
+
+function buildTemplatePrompt(name, description, templateInfo, errorContext = null, dir = null) {
   const { templateName, stackName, instructions, boilerplateFiles, components } = templateInfo
-  const fileList = boilerplateFiles.map(f => `  - ${f}`).join('\n')
+  const source = stackName ? `stack "${stackName}"` : `template "${templateName}"`
 
-  const source = stackName ? `stack "${stackName}" (base: ${templateName})` : `template "${templateName}"`
-  let prompt =
-    `Build a web application based on the ${source}.\n\n` +
-    `Name: ${name}\n` +
-    `Description: ${description}\n\n` +
-    `FILES ALREADY IN PROJECT DIRECTORY:\n${fileList}\n\n`
-
-  if (components.length) {
-    prompt += `INCLUDED COMPONENTS: ${components.join(', ')}\n\n`
+  // Read boilerplate file contents from disk so AI knows exactly what already exists
+  let boilerplateSection = ''
+  if (dir) {
+    const fileParts = []
+    for (const f of boilerplateFiles) {
+      if (TEMPLATE_SKIP_READ.has(f.split('/').pop())) continue
+      try {
+        const content = readFileSync(join(dir, f), 'utf8')
+        if (content.length <= BOILERPLATE_MAX_FILE_CHARS) {
+          fileParts.push(`--- FILE: ${f} ---\n${content}\n--- END FILE ---`)
+        }
+      } catch {}
+    }
+    if (fileParts.length) {
+      boilerplateSection = `\nBOILERPLATE ALREADY DEPLOYED (files live in the container):\n\n${fileParts.join('\n\n')}\n`
+    }
   }
 
+  let prompt =
+    `Customize this ${source} boilerplate for the user's request.\n\n` +
+    `App name: ${name}\n` +
+    `User request: ${description}\n` +
+    boilerplateSection + '\n'
+
   if (instructions) {
-    prompt += `INSTRUCTIONS:\n${instructions}\n\n`
+    prompt += `TEMPLATE INSTRUCTIONS:\n${instructions}\n\n`
+  }
+
+  if (components.length) {
+    prompt += `PRE-BUILT COMPONENTS (do NOT rewrite): ${components.join(', ')}\n\n`
   }
 
   prompt +=
-    `YOUR TASK:\n` +
-    `1. The files listed above are already copied into the project directory\n` +
-    `2. Customize and extend them to match the user's description\n` +
-    `3. Modify existing files as needed — you can overwrite boilerplate files\n` +
-    `4. Add new files if the description requires functionality beyond the template\n` +
-    `5. Integrate all components listed above into the application\n` +
-    `   IMPORTANT: Do NOT rewrite files marked with [component-name] prefix — those are pre-built toolkit files, use them as-is\n` +
-    `6. Update package.json name to "${name}"\n` +
-    `7. Ensure GET /health returns { status: "ok" } — MANDATORY\n` +
-    `8. Use ONLY ASCII characters in code\n` +
-    `9. Do NOT add the project name as a visible title\n\n` +
-    `Output order: Dockerfile first, package.json second, then all other files.\n` +
-    `Write ALL modified/new files to disk. Code only, no explanations.`
+    `OUTPUT RULES — read carefully:\n` +
+    `• The boilerplate files above are ALREADY in the container. Do NOT regenerate them unchanged.\n` +
+    `• Output ONLY files that need to change for this specific request.\n` +
+    `• Minimum output = fastest build. Only output what is genuinely different.\n` +
+    `• ALWAYS output: package.json (update name to "${name}")\n` +
+    `• Output HTML/CSS/JS/JSX only if you must customize the content for this request\n` +
+    `• Do NOT output: ${[...TEMPLATE_SKIP_OUTPUT].join(', ')}\n` +
+    `• GET /health must return { status: "ok" } — do not break it\n` +
+    `• ASCII only. No explanations outside code blocks.`
 
   if (errorContext) {
-    prompt += `\n\n⚠️ FIX: The previous attempt failed with this error. Analyze and fix the code:\n${errorContext}`
+    prompt += `\n\n⚠️ STARTUP ERROR TO FIX:\n${errorContext.slice(0, 1200)}`
   }
 
   return prompt
@@ -978,8 +1005,8 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
           userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
           log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
 
-          const prompt = buildClaudePrompt(name, description, errorContext, templateInfo)
-          builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
+          const prompt = buildClaudePrompt(name, description, errorContext, templateInfo, dir)
+          builderResult = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus, { maxTokens: 8000 })
         }
       } else {
         log.info(`[${logName}] no template matched, using generic build`)
