@@ -1230,21 +1230,18 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
 }
 
 // Progress bar helpers for Telegram build status messages
-const PHASE_STEPS = { starting: 0, thinking: 2, editing: 4, installing: 6, building: 8, launching: 9, running: 10 }
-function buildProgressText(name, url, phase, userInput) {
+const PHASE_STEPS = { starting: 1, thinking: 3, editing: 5, installing: 7, building: 8, launching: 9, running: 10 }
+const PHASE_LABEL = { thinking: 'Agent thinking', editing: 'Applying changes', installing: 'Installing deps', building: 'Building', launching: 'Launching', starting: 'Starting' }
+const SPINNER_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+function buildProgressText(name, url, phase, userInput, tick) {
   const n = PHASE_STEPS[phase] ?? 1
   const bar = '▓'.repeat(n) + '░'.repeat(10 - n)
-  const label = phase === 'thinking'   ? 'Agent thinking...'
-    : phase === 'editing'    ? 'Applying changes...'
-    : phase === 'installing' ? 'Installing deps...'
-    : phase === 'building'   ? 'Building...'
-    : phase === 'launching'  ? 'Launching...'
-    : 'Starting...'
-  // Compact variant for conversational changes — no URL, just the progress bar
+  const spin = SPINNER_FRAMES[(tick || 0) % SPINNER_FRAMES.length]
+  const label = PHASE_LABEL[phase] || 'Working'
   if (userInput) {
-    return `🔨 *${name}* — _"${userInput.slice(0, 55)}"_\n\`${bar}\` ${label}`
+    return `🔨 *${name}* — _"${userInput.slice(0, 55)}"_\n\`${bar}\` ${spin} ${label}...\n[🌐 Watch live](${url})`
   }
-  return `⏳ *${name}*\nRebuilding...\n\n\`${bar}\` ${label}`
+  return `⏳ *${name}*\n\`${bar}\` ${spin} ${label}...\n[🌐 Watch live](${url})`
 }
 
 // Poll container /health in background; update Telegram message with progress bar,
@@ -1263,7 +1260,7 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
   }
   if (!host) { pollingSet.delete(buildKey); return }
   const url = projectUrl(userId, name)
-  let lastPhase = null
+  let tick = 0
 
   // Poll /health every 3s for up to 5 minutes
   for (let i = 0; i < 100; i++) {
@@ -1276,14 +1273,14 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
       const data = await resp.json()
       const phase = data.phase || data.state || 'starting'
 
-      // Update progress bar whenever phase changes (avoids Telegram rate limits)
-      if (phase !== lastPhase && data.state !== 'running' && data.state !== 'error') {
-        lastPhase = phase
+      // Update every tick so the spinner animates (Telegram ignores edits with identical text)
+      if (data.state !== 'running' && data.state !== 'error') {
+        tick++
         const { Markup } = await import('telegraf')
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
-          buildProgressText(name, url, phase, userInput),
-          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([]) }
+          buildProgressText(name, url, phase, userInput, tick),
+          { parse_mode: 'Markdown', disable_web_page_preview: true, ...Markup.inlineKeyboard([]) }
         ).catch(() => {})
       }
 
