@@ -8,7 +8,7 @@
 
 <h1 align="center">vps-bot-multi</h1>
 <p align="center"><strong>Describe it. Deploy it. For everyone.</strong></p>
-<p align="center">Multi-user AI deploy platform — a public Telegram bot where anyone can describe an app and get it running on your VPS with Docker + SSL in under 20 seconds.</p>
+<p align="center">Multi-user AI deploy platform — a public Telegram bot where anyone can describe an app and get a live URL in seconds. The AI generates, installs, and launches the app <em>inside the container</em> with a real-time web console you can watch.</p>
 <p align="center"><a href="https://t.me/VpsCodeBot">🤖 Try it: t.me/VpsCodeBot</a></p>
 
 ---
@@ -16,28 +16,29 @@
 ## How It Works
 
 ```
-  Any Telegram user: "A real-time chat app with rooms"
+  User on Telegram: "A kanban board with drag and drop"
    │
    ▼
-  Auto-register → creates isolated user space on server
+  Bot matches template → copies boilerplate to project dir
    │
    ▼
-  Template matching → selects best starter template
+  Docker builds image (COPY . .) → container starts on :3000
+   │                               URL sent to Telegram immediately
+   ▼
+  builder-server.js runs inside container:
+    ├── serves live web console at the project URL
+    ├── calls DeepSeek V3 via OpenRouter (streaming)
+    │   └── writes files to /app as tokens arrive
+    ├── npm install  (output streamed to browser)
+    ├── npm run build (if needed)
+    └── server.close() → spawns the real app on :3000
    │
    ▼
-  DeepSeek V3 (streaming) → auto-names project + generates all files
-   │                         writes each file to disk as it arrives
-   ▼
-  Docker build starts in parallel → npm install runs while AI
-   │                                 is still generating source files
-   ▼
-  Caddy → https://john-chat.yourdomain.com ✓  (~15-20s total)
-   │
-   ▼
-  Auto-sleep after 30 min idle → wake on request
+  Browser auto-reloads → real app is live
+  Caddy → https://john-kanban.yourdomain.com ✓
 ```
 
-**No server interaction needed after initial install.** Users find your bot on Telegram and start building.
+**The container never restarts.** The builder hands off port 3000 to the app in place.
 
 ---
 
@@ -66,7 +67,6 @@ After the first install, save your credentials to `~/.vpsbot` — the script off
 💾 Save credentials to ~/.vpsbot to skip this wizard next time? [Y/n]
 ```
 
-Every subsequent install sources `~/.vpsbot` and skips all prompts entirely.
 You can also create it manually:
 
 ```bash
@@ -83,50 +83,80 @@ chmod 600 ~/.vpsbot
 
 ## Features
 
+- **Live build console** — users watch DeepSeek generate their app in real time via a terminal-style web UI
+- **No container restart** — builder hands off port 3000 to the app in place, zero downtime transition
 - **Auto-registration** — users are created automatically on first `/start`
-- **Auto-named projects** — DeepSeek generates a short slug from the description; no name step
+- **Auto-named projects** — DeepSeek generates a short slug from the description
 - **Per-user isolation** — each user has their own directory, projects, and containers
 - **Configurable limits** — `MAX_APPS_PER_USER` in `.env` (default: 3)
-- **Forced auto-sleep** — idle containers stop after 30 min, wake on HTTP request
-- **Admin panel** — server status, user list, ban/unban (for ADMIN_USER_ID)
-- **AI-powered builds** — DeepSeek V3 via OpenRouter, extremely cheap per build
-- **Streaming generation** — files written to disk as they arrive, not after full response
-- **Parallel Docker build** — `npm install` starts the moment `package.json` + `Dockerfile` land
-- **Build cache warmup** — install pre-pulls `node:20-alpine` and warms the npm cache
+- **Auto-sleep** — idle containers stop after 30 min, wake on HTTP request
+- **Admin panel** — server status, user list, ban/unban, maintenance mode
+- **Streaming generation** — files written to disk as tokens arrive
+- **Template matching** — boilerplate copied before AI runs, speeds up generation
 - **Build queue** — `MAX_CONCURRENT_BUILDS` prevents server overload
-- **Template matching** — accelerated builds with template boilerplate
+- **Full build logs** — container output streamed to `logs/build-*.log` automatically
 
 ---
 
-## Build Speed
+## Container Architecture
 
-| Scenario | Time |
-|---|---|
-| First build (cold server) | ~30-45s |
-| First build (after install warmup) | **~15-20s** |
-| Rebuild (code changes only) | **~10-15s** |
-| Rebuild (no dependency changes) | **~6-8s** |
+Each project runs in a single Docker container through two phases:
 
-The key optimisation: AI streams files one by one. Docker starts building the moment `package.json` + `Dockerfile` arrive — so `npm install` runs in parallel with the remaining source files being generated.
+```
+┌─────────────────────────────────────────────────────┐
+│  container: user-projectname-app   port: 3000        │
+│                                                      │
+│  /app/                                               │
+│  ├── builder-server.js   ← orchestrator              │
+│  ├── .build-prompt.txt                               │
+│  └── [template files]                                │
+│                                                      │
+│  PHASE 1 — builder-server.js                         │
+│    serves web console on :3000                       │
+│    → calls OpenRouter API (DeepSeek V3, cloud)       │
+│    → writes generated files to /app/                 │
+│    → runs npm install / npm run build                │
+│    → server.close()                                  │
+│                                                      │
+│  PHASE 2 — real app                                  │
+│    spawn("node src/index.js")  on :3000              │
+│    container keeps running, same port                │
+└─────────────────────────────────────────────────────┘
+```
+
+DeepSeek never runs on your server — it's a cloud API call from inside the container.
+
+### Edit / Rebuild flow
+
+```
+Telegram "change the button color"
+  │
+  ▼
+docker cp container:/app/. projectdir/   ← sync latest files to host
+docker compose up --build                ← new image with current files
+  │
+  ▼
+PHASE 1 again: AI patches only changed files
+PHASE 2: updated app launches
+```
 
 ---
 
-## Telegram Bot
+## Telegram UX
+
+When a project is created or rebuilt, you get a single message:
 
 ```
-⚡ vps-bot multi
-Describe it. Deploy it.
+🚀 my-kanban
+🌐 https://my-kanban.yourdomain.com
 
-📊 Apps: 1/3
-[🚀 My Projects]
-[➕ New Project]
+Open the link — your app is building live inside the container.
+
+[♻️ Rebuild]  [📋 Logs]
+[🔗 URL]      [⬅️ List]
 ```
 
-### User Flow
-
-1. Tap **➕ New Project**
-2. Describe what the app should do
-3. Bot auto-generates a name, deploys, and returns the URL — done
+Open the URL to watch the live console. The page auto-reloads when the app is ready.
 
 ### Commands
 
@@ -135,7 +165,7 @@ Describe it. Deploy it.
 | `/start` | Main menu |
 | `/list` | List your projects |
 | `/url <name>` | Get project URL |
-| `/rebuild <name>` | Rebuild project |
+| `/rebuild <name> [changes]` | Patch or rebuild project |
 | `/delete <name>` | Delete project |
 
 ### Admin (inline buttons)
@@ -143,13 +173,33 @@ Describe it. Deploy it.
 - **📊 Server Status** — CPU, RAM, disk, running containers, build queue
 - **👥 Users** — list all users with app counts
 - **🛑 Stop All** — stop all running containers
-- **⏸ Pause / ▶️ Resume** — maintenance mode (blocks non-admin users)
+- **⏸ Pause / ▶️ Resume** — maintenance mode
+
+---
+
+## Logs
+
+```bash
+# All phases of a build (generation, npm install, app startup, errors)
+tail -f logs/build-username-projectname.log
+
+# Bot system log (registrations, errors)
+tail -f logs/system.log
+
+# Raw container output
+docker logs username-projectname-app --follow
+
+# Find errors across all builds
+grep ERROR logs/build-*.log
+```
+
+Container output (npm install, app crashes, etc.) is automatically streamed to the build log file — no manual `docker logs` needed for debugging.
 
 ---
 
 ## Configuration
 
-All via `.env` (written automatically by the installer):
+All via `.env`:
 
 ```bash
 # Required
@@ -168,14 +218,14 @@ IDLE_TIMEOUT=30                        # minutes before container sleeps
 
 ---
 
-## Architecture
+## Architecture Overview
 
 ```
         ┌──────────────────────┐
         │  Any Telegram User   │
         └──────────┬───────────┘
                    │
-              vps-bot-multi
+              vps-bot-multi (Node.js, host)
                    │
        ┌───────────┼───────────┐
        │           │           │
@@ -183,26 +233,42 @@ IDLE_TIMEOUT=30                        # minutes before container sleeps
    (user-store)   (queue)      (30 min)
        │           │           │
        ▼           ▼           ▼
-   /projects/   DeepSeek V3  Stop idle
-   {username}/  → Docker →   Wake on
-   {app}/       Caddy        HTTP request
+   /projects/   docker build  Stop idle
+   {username}/  + start       Wake on
+   {app}/       container     HTTP request
+                   │
+                   ▼
+            builder-server.js
+            (inside container)
+                   │
+          ┌────────┴────────┐
+          │                 │
+     OpenRouter API    writes /app/*
+     (DeepSeek V3)    npm install
+     cloud, billed    npm run build
+     per token        spawn app
 ```
 
 ### Data Layout
 
 ```
 /home/vpsbot/projects/
-├── users.json                    # All registered users
-├── john/                         # User @john's space
-│   ├── projects.json             # User's project registry
-│   ├── chat-rooms/               # Auto-named from description
+├── users.json
+├── john/
+│   ├── projects.json
+│   ├── kanban-board/
 │   │   ├── src/
+│   │   ├── builder-server.js     ← baked into image at build time
 │   │   ├── Dockerfile
-│   │   └── docker-compose.yml    # container: john-chat-rooms-app
-│   └── task-tracker/             # URL: john-task-tracker.domain.com
+│   │   └── docker-compose.yml    # container: john-kanban-board-app
+│   └── task-tracker/
 └── maria/
-    ├── projects.json
-    └── weather-bot/              # URL: maria-weather-bot.domain.com
+    └── weather-bot/
+
+logs/
+├── system.log
+├── build-john-kanban-board.log   ← full container output
+└── build-maria-weather-bot.log
 ```
 
 ---
@@ -212,21 +278,21 @@ IDLE_TIMEOUT=30                        # minutes before container sleeps
 ```
 vps-bot-multi/
 ├── src/
-│   ├── bot.js              # Telegram bot, conversation state machine
+│   ├── bot.js                  # Telegram bot, conversation state machine
 │   ├── commands/
-│   │   ├── projects.js     # AI generation + Docker deploy + streaming
-│   │   └── menu.js         # Inline keyboard menus
+│   │   ├── projects.js         # Build orchestration + Docker + logging
+│   │   └── menu.js             # Inline keyboard menus
 │   └── lib/
-│       ├── config.js       # Environment config + limits
-│       ├── user-store.js   # Per-user project store + user management
-│       ├── docker-client.js # Dockerode singleton
-│       ├── sleep-manager.js # Auto-sleep + wake proxy
-│       ├── build-state.js  # In-progress build tracking
-│       ├── build-queue.js  # Concurrency limiter
-│       ├── logger.js       # Centralized logging
-│       ├── templates.js    # Template sync, matching & boilerplate
-│       ├── branding.js     # Branding
-│       └── caddy.js        # Caddy admin API
+│       ├── builder-server.js   # Runs inside container: AI → install → launch
+│       ├── config.js           # Environment config + limits
+│       ├── user-store.js       # Per-user project store
+│       ├── docker-client.js    # Dockerode singleton
+│       ├── sleep-manager.js    # Auto-sleep + wake proxy
+│       ├── build-state.js      # In-progress build tracking
+│       ├── build-queue.js      # Concurrency limiter
+│       ├── logger.js           # Centralized file logging
+│       ├── templates.js        # Template sync, matching & boilerplate
+│       └── caddy.js            # Caddy admin API
 ├── logs/
 ├── .env.example
 └── package.json
