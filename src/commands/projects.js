@@ -238,6 +238,30 @@ networks:
   writeFileSync(join(dir, 'docker-compose.yml'), compose)
 }
 
+// Stream container logs to the build log file in the background.
+// Runs until the container stops or MAX_LOG_FOLLOW_MS elapses.
+const MAX_LOG_FOLLOW_MS = 15 * 60 * 1000  // 15 min ceiling
+
+function followContainerLogs(containerFullName, logName) {
+  const child = spawn('docker', ['logs', '--follow', '--timestamps', containerFullName], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  const writeLine = (line) => {
+    // Strip Docker multiplexed stream header bytes (8-byte binary prefix)
+    line = line.replace(/^[\x00-\x02][\x00\x00\x00\x00][\x00-\xff][\x00-\xff][\x00-\xff][\x00-\xff]/, '').trim()
+    if (line) log.build(logName, `[container] ${line}`)
+  }
+
+  child.stdout.on('data', d => d.toString().split('\n').forEach(writeLine))
+  child.stderr.on('data', d => d.toString().split('\n').forEach(writeLine))
+  child.on('exit', (code) => log.build(logName, `[container] log stream ended (exit ${code})`))
+  child.on('error', () => {})
+
+  const timer = setTimeout(() => { try { child.kill() } catch {} }, MAX_LOG_FOLLOW_MS)
+  child.on('exit', () => clearTimeout(timer))
+}
+
 // Start the builder container (fire-and-forget).
 // The container handles generation → npm install → npm build → app launch internally.
 // Returns 'async' on success (caller skips Phase 3), false if container failed to start.
@@ -273,6 +297,9 @@ async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
   const url = projectUrl(userId, name)
   log.build(logName, `Builder container live → ${url}`)
   await onStatus(`🌐 Open now: ${url}\n🧠 AI is building your app live...`)
+
+  // Stream container output to the build log (non-blocking)
+  followContainerLogs(containerName, logName)
 
   // The container self-manages: generation → install → launch. Nothing more to do here.
   return 'async'
