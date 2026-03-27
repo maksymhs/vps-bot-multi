@@ -1029,116 +1029,48 @@ CMD ["npm", "start"]`)
   await onStatus(`✅ Ready → ${url}`)
 }
 
-// Animated progress indicator for Telegram
-function createProgressAnimator(ctx, name, buildStart) {
-  const frames = ['◐', '◓', '◑', '◒']
-  const barFrames = ['▱▱▱▱▱', '▰▱▱▱▱', '▰▰▱▱▱', '▰▰▰▱▱', '▰▰▰▰▱', '▰▰▰▰▰']
-  let msgId = null
-  let currentText = ''
-  let currentRetry = ''
-  let stickyUrl = null   // set once Phase 1 gives us a URL — never cleared
-  let frame = 0
-  let barIdx = 0
-  let timer = null
-  let stopped = false
-
-  const formatMsg = () => {
-    const elapsed = Math.round((Date.now() - buildStart) / 1000)
-    const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`
-    const spinner = frames[frame % frames.length]
-    const bar = barFrames[barIdx % barFrames.length]
-    const urlLine = stickyUrl ? `🌐 ${stickyUrl}\n` : ''
-    return `${spinner} *${name}*${currentRetry}\n${urlLine}${currentText}\n\`${bar}\` _${timeStr}_`
-  }
-
-  const tick = async () => {
-    if (stopped || !msgId) return
-    frame++
-    // Advance bar slowly (every 2 ticks = 6s per step)
-    if (frame % 2 === 0 && barIdx < barFrames.length - 1) barIdx++
-    try {
-      await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, formatMsg(), { parse_mode: 'Markdown' })
-    } catch {}
-  }
-
-  return {
-    async update(text) {
-      // If text contains a URL line (Phase 1 open-now message), extract and pin it
-      const urlMatch = text.match(/🌐 Open now: (https?:\/\/\S+)/)
-      if (urlMatch) {
-        stickyUrl = urlMatch[1]
-        // Keep only the status part (after the URL line)
-        currentText = text.replace(/🌐 Open now: \S+\n?/, '').trim()
-      } else {
-        currentText = text
-      }
-      // Reset bar on phase change
-      barIdx = 0
-      frame = 0
-      const fullText = formatMsg()
-      if (msgId) {
-        try {
-          await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, fullText, { parse_mode: 'Markdown' })
-        } catch {}
-      } else {
-        const msg = await ctx.reply(fullText, { parse_mode: 'Markdown' })
-        msgId = msg.message_id
-      }
-      // Start animation loop
-      if (timer) clearInterval(timer)
-      timer = setInterval(tick, 3000)
-    },
-    setRetry(attempt, max) {
-      currentRetry = ` · Retry ${attempt}/${max}`
-    },
-    resetMsg() {
-      msgId = null
-    },
-    stop() {
-      stopped = true
-      if (timer) clearInterval(timer)
-    },
-  }
-}
-
 async function deployWithRetry(ctx, dir, userId, name, description, action, model = null, mode = null) {
   let lastError = null
-  const buildStart = Date.now()
   const slug = userStore.getUserSlug(userId)
   const logName = `${slug}-${name}`
-  const anim = createProgressAnimator(ctx, name, buildStart)
 
   if (!mode) mode = action === 'new' ? 'new' : 'rebuild'
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 1) {
-      anim.setRetry(attempt, MAX_RETRIES)
-      anim.resetMsg()
-    }
-
-    const onStatus = (text) => anim.update(text)
+    const onStatus = (text) => log.info(`[${logName}] ${text}`)
 
     try {
-      await buildAndVerify(dir, userId, name, description, onStatus,
+      const result = await buildAndVerify(dir, userId, name, description, onStatus,
         attempt > 1 ? lastError?.message : null, model, mode)
-
-      anim.stop()
-      return true
+      return result === 'async' ? 'async' : true
     } catch (err) {
       lastError = err
       log.error(`[${logName}] attempt ${attempt} failed`, err.message)
       if (attempt < MAX_RETRIES) {
-        anim.stop()
         await ctx.reply(`⚠️ Attempt ${attempt} failed, retrying...`, { parse_mode: 'Markdown' })
         await new Promise(r => setTimeout(r, 2000))
       }
     }
   }
 
-  anim.stop()
   log.error(`[${logName}] failed after ${MAX_RETRIES} attempts`, lastError?.message)
-  await ctx.reply(`❌ *${name}* — Failed after ${MAX_RETRIES} attempts`, { parse_mode: 'Markdown' })
+  await ctx.reply(`❌ *${name}* — Failed to start. Check your config.`, { parse_mode: 'Markdown' })
   return false
+}
+
+async function sendProjectMessage(ctx, name, result) {
+  const { Markup } = await import('telegraf')
+  const url = projectUrl(getUserId(ctx), name)
+  const text = result === 'async'
+    ? `🚀 *${name}*\n🌐 ${url}\n\n_Open the link — your app is building live inside the container._`
+    : `✅ *${name}* is ready\n🔗 ${url}`
+  await ctx.reply(text, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('♻️ Rebuild', `rb:${name}`), Markup.button.callback('📋 Logs', `lg:${name}`)],
+      [Markup.button.callback('🔗 URL', `url:${name}`), Markup.button.callback('⬅️ List', 'list')],
+    ]),
+  })
 }
 
 export async function deployNew(ctx, name, description, model = null) {
@@ -1146,34 +1078,22 @@ export async function deployNew(ctx, name, description, model = null) {
   const dir = userStore.projectDir(userId, name)
   mkdirSync(dir, { recursive: true })
   try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
-  const ok = await deployWithRetry(ctx, dir, userId, name, description, 'new', model)
-  if (ok) {
+  const result = await deployWithRetry(ctx, dir, userId, name, description, 'new', model)
+  if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
-
-    const { Markup } = await import('telegraf')
-    const url = projectUrl(userId, name)
-    await ctx.reply(`✅ *${name}* created\n🔗 ${url}`, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('♻️ Rebuild', `rb:${name}`), Markup.button.callback('📋 Logs', `lg:${name}`)],
-        [Markup.button.callback('🔗 URL', `url:${name}`), Markup.button.callback('⬅️ List', 'list')],
-      ]),
-    })
+    await sendProjectMessage(ctx, name, result)
   }
-  return ok
+  return result
 }
 
 export async function deployRebuild(ctx, name, description, model = null, mode = 'patch') {
   const userId = getUserId(ctx)
   const dir = userStore.projectDir(userId, name)
 
-  // For full rebuild, remove the project directory first to recreate from scratch
   if (mode === 'full') {
     try {
       await dockerComposeDown(dir)
-      if (existsSync(dir)) {
-        rmSync(dir, { recursive: true, force: true })
-      }
+      if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
       mkdirSync(dir, { recursive: true })
       try { execSync(`chown -R vpsbot:vpsbot ${JSON.stringify(dir)}`) } catch {}
     } catch (err) {
@@ -1181,21 +1101,12 @@ export async function deployRebuild(ctx, name, description, model = null, mode =
     }
   }
 
-  const ok = await deployWithRetry(ctx, dir, userId, name, description, 'rebuild', model, mode)
-  if (ok) {
+  const result = await deployWithRetry(ctx, dir, userId, name, description, 'rebuild', model, mode)
+  if (result) {
     userStore.setProject(userId, name, { description, url: projectUrl(userId, name), dir, model })
-
-    const { Markup } = await import('telegraf')
-    const url = projectUrl(userId, name)
-    await ctx.reply(`✅ *${name}* updated\n🔗 ${url}`, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('♻️ Rebuild', `rb:${name}`), Markup.button.callback('📋 Logs', `lg:${name}`)],
-        [Markup.button.callback('🔗 URL', `url:${name}`), Markup.button.callback('⬅️ List', 'list')],
-      ]),
-    })
+    await sendProjectMessage(ctx, name, result)
   }
-  return ok
+  return result
 }
 
 export async function newCommand(ctx) {
@@ -1222,17 +1133,8 @@ export async function newCommand(ctx) {
   if (buildingSet.has(buildKey)) return ctx.reply(`"${name}" is already building...`)
 
   buildingSet.add(buildKey)
-  const msg = await ctx.reply('⚙️ Starting...', { parse_mode: 'Markdown' })
-  const ok = await deployNew(ctx, name, description)
+  await deployNew(ctx, name, description)
   buildingSet.delete(buildKey)
-
-  if (ok) {
-    return ctx.telegram.editMessageText(
-      ctx.chat.id, msg.message_id, undefined,
-      `✅ *${name}* is ready!\n\n🔗 ${projectUrl(userId, name)}\n\n_/rebuild ${name} to iterate_`,
-      { parse_mode: 'Markdown' }
-    )
-  }
 }
 
 export async function rebuildCommand(ctx) {
@@ -1252,17 +1154,8 @@ export async function rebuildCommand(ctx) {
 
   buildingSet.add(buildKey)
   const description = newDescription || project.description
-  const msg = await ctx.reply('♻️ Starting...', { parse_mode: 'Markdown' })
-  const ok = await deployRebuild(ctx, name, description)
+  await deployRebuild(ctx, name, description)
   buildingSet.delete(buildKey)
-
-  if (ok) {
-    return ctx.telegram.editMessageText(
-      ctx.chat.id, msg.message_id, undefined,
-      `✅ *${name}* updated!\n\n🔗 ${projectUrl(userId, name)}`,
-      { parse_mode: 'Markdown' }
-    )
-  }
 }
 
 export async function listCommand(ctx) {
