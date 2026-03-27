@@ -1,6 +1,7 @@
 import { execFile, execSync, spawn } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, statSync } from 'fs'
 import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
 import { getDocker } from '../lib/docker-client.js'
 import { buildingSet } from '../lib/build-state.js'
 import { config } from '../lib/config.js'
@@ -8,6 +9,9 @@ import { userStore } from '../lib/user-store.js'
 import { log } from '../lib/logger.js'
 import { syncTemplates, matchTemplate, resolveAndCopy } from '../lib/templates.js'
 import { enqueueBuild, getQueuePosition } from '../lib/build-queue.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const BUILDER_SERVER_JS = readFileSync(join(__dirname, '../lib/builder-server.js'), 'utf8')
 
 const MAX_RETRIES = 2
 
@@ -78,6 +82,38 @@ COPY loading-server.js .
 EXPOSE 3000
 CMD ["node", "loading-server.js"]
 `
+
+const BUILDER_DOCKERFILE = `FROM node:20-alpine
+WORKDIR /app
+COPY builder-server.js .
+EXPOSE 3000
+CMD ["node", "builder-server.js"]
+`
+
+const SYSTEM_PROMPT = `You are a code generator. Output ONLY file contents in this exact format for EACH file:
+
+--- FILE: path/to/file.ext ---
+file contents here
+--- END FILE ---
+
+CRITICAL OUTPUT ORDER: Always output Dockerfile first, then package.json second, then all remaining files. This order is mandatory.
+DOCKERFILE RULES: Always use "COPY package*.json ./" (never "COPY package.json package-lock.json ./"). Always use node:20-alpine. Always use --mount=type=cache,target=/root/.npm for npm install.
+For multi-stage Vite builds Stage 2 MUST include node_modules — use exactly this pattern:
+  FROM node:20-alpine AS build
+  WORKDIR /app
+  COPY package*.json ./
+  RUN --mount=type=cache,target=/root/.npm npm install
+  COPY . .
+  RUN npm run build
+  FROM node:20-alpine
+  WORKDIR /app
+  COPY --from=build /app/dist ./dist
+  COPY --from=build /app/node_modules ./node_modules
+  COPY --from=build /app/package.json ./
+  EXPOSE 3000
+  CMD ["npm", "start"]
+TOOLKIT FILES: Files listed with a [component-name] prefix are pre-built toolkit files. Do NOT rewrite or output them — only output application files that need to change.
+Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
 
 function getUserId(ctx) {
   return ctx.from?.id
@@ -212,6 +248,166 @@ networks:
 `
   }
   writeFileSync(join(dir, 'docker-compose.yml'), compose)
+}
+
+// Builder compose: like writeComposeFile but adds volume mount + env vars for the AI builder container
+function writeBuilderComposeFile(dir, userId, name) {
+  const containerName = userStore.containerName(userId, name)
+  const subdomain = name
+  let compose
+  if (config.domain) {
+    compose = `services:
+  app:
+    container_name: ${containerName}
+    build: .
+    restart: unless-stopped
+    volumes:
+      - .:/workspace
+    environment:
+      - OPENROUTER_API_KEY=${config.openrouterKey || ''}
+      - PROJECT_NAME=${name}
+    networks:
+      - caddy
+    labels:
+      caddy: ${subdomain}.${config.domain}
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  caddy:
+    external: true
+`
+  } else {
+    const existing = userStore.getProject(userId, name)
+    const port = existing?.port || getNextPort(userId)
+    const url = `http://${config.ipAddress || 'localhost'}:${port}`
+    userStore.setProject(userId, name, { port, url })
+    compose = `services:
+  app:
+    container_name: ${containerName}
+    build: .
+    restart: unless-stopped
+    volumes:
+      - .:/workspace
+    environment:
+      - OPENROUTER_API_KEY=${config.openrouterKey || ''}
+      - PROJECT_NAME=${name}
+    ports:
+      - "${port}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+`
+  }
+  writeFileSync(join(dir, 'docker-compose.yml'), compose)
+}
+
+// Poll the builder container's /health endpoint until done:true or error or timeout
+async function waitForBuilderComplete(containerFullName, project, logName, timeoutMs = 600_000) {
+  const deadline = Date.now() + timeoutMs
+  let healthHost, healthPort
+
+  if (!config.domain && project?.port) {
+    healthHost = '127.0.0.1'
+    healthPort = project.port
+  } else {
+    for (let i = 0; i < 15; i++) {
+      const ip = await getContainerIpByFullName(containerFullName)
+      if (ip) { healthHost = ip; healthPort = 3000; break }
+      await new Promise(r => setTimeout(r, 2000))
+    }
+  }
+
+  if (!healthHost) {
+    log.error(`[${logName}] waitForBuilder: could not resolve container IP`)
+    return false
+  }
+
+  log.build(logName, `Waiting for builder at ${healthHost}:${healthPort}`)
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://${healthHost}:${healthPort}/health`, {
+        signal: AbortSignal.timeout(5000),
+      })
+      const data = await res.json()
+      if (data.done === true) {
+        log.build(logName, `Builder done — ${data.filesWritten} files written`)
+        return true
+      }
+      if (data.error) {
+        log.error(`[${logName}] Builder reported error: ${data.error}`)
+        return false
+      }
+    } catch { /* container still starting or generating */ }
+    await new Promise(r => setTimeout(r, 3000))
+  }
+
+  log.error(`[${logName}] waitForBuilder: timed out after ${timeoutMs / 1000}s`)
+  return false
+}
+
+// Start builder container, wait for it to finish writing files, clean up.
+// Returns true if generation succeeded, false if it failed/timed out (caller falls back to external generation).
+async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus) {
+  writeFileSync(join(dir, '.build-prompt.txt'), prompt)
+  writeFileSync(join(dir, '.build-system-prompt.txt'), SYSTEM_PROMPT)
+  writeFileSync(join(dir, 'builder-server.js'), BUILDER_SERVER_JS)
+  writeFileSync(join(dir, 'Dockerfile'), BUILDER_DOCKERFILE)
+  writeBuilderComposeFile(dir, userId, name)
+
+  log.build(logName, 'Builder container: starting')
+  try {
+    await dockerComposeUp(dir, null)
+  } catch (err) {
+    log.build(logName, `Builder container failed to start: ${err.message}`)
+    for (const f of ['builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt']) {
+      try { rmSync(join(dir, f)) } catch {}
+    }
+    return false
+  }
+
+  const url = projectUrl(userId, name)
+  log.build(logName, `Builder container live → ${url}`)
+  await onStatus(`🌐 Open now: ${url}\n🧠 AI working on your app live...`)
+
+  const containerFullName = userStore.containerName(userId, name)
+  const project = userStore.getProject(userId, name)
+  const builderDone = await waitForBuilderComplete(containerFullName, project, logName)
+
+  if (!builderDone) {
+    log.build(logName, 'Builder timed out — will fall back to external generation')
+    for (const f of ['builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt']) {
+      try { rmSync(join(dir, f)) } catch {}
+    }
+    return false
+  }
+
+  // If AI did not generate a new Dockerfile, remove the builder's so Phase 3 uses the fallback
+  const currentDockerfile = existsSync(join(dir, 'Dockerfile'))
+    ? readFileSync(join(dir, 'Dockerfile'), 'utf8').trim()
+    : ''
+  if (currentDockerfile === BUILDER_DOCKERFILE.trim()) {
+    log.build(logName, 'AI did not generate a Dockerfile — using generic fallback')
+    try { rmSync(join(dir, 'Dockerfile')) } catch {}
+  }
+
+  // Clean up builder artifacts
+  for (const f of ['builder-server.js', '.build-prompt.txt', '.build-system-prompt.txt', '.build-complete', '.build-error']) {
+    try { rmSync(join(dir, f)) } catch {}
+  }
+
+  // Restore regular compose (no volume/env) for Phase 3
+  writeComposeFile(dir, userId, name)
+
+  log.build(logName, 'Builder container: done, compose restored for Phase 3')
+  return true
 }
 
 function buildClaudePrompt(name, description, errorContext = null, templateInfo = null) {
@@ -492,30 +688,7 @@ async function generateCode(dir, name, description, onProgress = null, errorCont
 
   if (onProgress) await onProgress('🧠 Generating code...')
 
-  const systemPrompt = `You are a code generator. Output ONLY file contents in this exact format for EACH file:
-
---- FILE: path/to/file.ext ---
-file contents here
---- END FILE ---
-
-CRITICAL OUTPUT ORDER: Always output Dockerfile first, then package.json second, then all remaining files. This order is mandatory.
-DOCKERFILE RULES: Always use "COPY package*.json ./" (never "COPY package.json package-lock.json ./"). Always use node:20-alpine. Always use --mount=type=cache,target=/root/.npm for npm install.
-For multi-stage Vite builds Stage 2 MUST include node_modules — use exactly this pattern:
-  FROM node:20-alpine AS build
-  WORKDIR /app
-  COPY package*.json ./
-  RUN --mount=type=cache,target=/root/.npm npm install
-  COPY . .
-  RUN npm run build
-  FROM node:20-alpine
-  WORKDIR /app
-  COPY --from=build /app/dist ./dist
-  COPY --from=build /app/node_modules ./node_modules
-  COPY --from=build /app/package.json ./
-  EXPOSE 3000
-  CMD ["npm", "start"]
-TOOLKIT FILES: Files listed with a [component-name] prefix are pre-built toolkit files. Do NOT rewrite or output them — only output application files that need to change.
-Do NOT include explanations, comments outside code, or markdown fences. Output ALL files needed for a complete working application. Every file must use this exact format.`
+  const systemPrompt = SYSTEM_PROMPT
 
   if (!config.openrouterKey) throw new Error('No AI provider available (set OPENROUTER_API_KEY in .env)')
 
@@ -881,38 +1054,10 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
           userStore.setProject(userId, name, { template: templateInfo.templateName, components: templateInfo.components, stack: templateInfo.stackName })
           log.info(`[${logName}] files copied: ${templateInfo.boilerplateFiles.length} files, components=[${templateInfo.components.join(',')}]`)
 
-          // ── Phase 1: start loading server immediately ───────────────────────
-          // A minimal Node.js server starts in ~3s (no npm install, no vite build)
-          // so the user gets a live URL right away while the real app is generated.
-          // The AI overwrites Dockerfile in Phase 2; we restore or clean it before Phase 3.
-          writeComposeFile(dir, userId, name)
-
-          // Backup template's Dockerfile so we can restore if AI skips it
-          if (existsSync(join(dir, 'Dockerfile'))) {
-            writeFileSync(join(dir, 'Dockerfile.template'), readFileSync(join(dir, 'Dockerfile')))
-          }
-          writeFileSync(join(dir, 'loading-server.js'), LOADING_SERVER_JS)
-          writeFileSync(join(dir, 'Dockerfile'), LOADING_DOCKERFILE)
-
-          log.build(logName, 'Phase 1: starting loading server')
-          try {
-            await dockerComposeUp(dir, null)
-            templateStarted = true
-            const url = projectUrl(userId, name)
-            log.build(logName, `Phase 1: loading server live → ${url}`)
-            await onStatus(`🌐 Open now: ${url}\n🧠 Generating your app...`)
-          } catch (err) {
-            log.build(logName, `Phase 1: loading server failed (will build after gen): ${err.message}`)
-            // Clean up loading artifacts so Phase 3 starts clean
-            for (const f of ['loading-server.js', 'Dockerfile.template']) {
-              try { rmSync(join(dir, f)) } catch {}
-            }
-            // Restore original Dockerfile
-            if (existsSync(join(dir, 'Dockerfile.template'))) {
-              writeFileSync(join(dir, 'Dockerfile'), readFileSync(join(dir, 'Dockerfile.template')))
-              rmSync(join(dir, 'Dockerfile.template'))
-            }
-          }
+          // ── Phase 1+2: builder container (new build with template) ────────
+          // Serves a live web console where the user can watch the AI editing files.
+          const prompt = buildClaudePrompt(name, description, errorContext, templateInfo)
+          templateStarted = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
         }
       } else {
         log.info(`[${logName}] no template matched, using generic build`)
@@ -922,34 +1067,29 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
     }
   }
 
-  // Write compose file if Phase 1 didn't do it (patch/full modes or no template match)
+  // ── Builder container for patch / full-rebuild / new without template ──────
+  // Extends the live web console to ALL edit modes, not just new+template builds.
+  if (!templateStarted && config.openrouterKey) {
+    let prompt
+    if (mode === 'patch') {
+      const existingFiles = getExistingFiles(dir)
+      prompt = buildRebuildPrompt(name, description, 'patch', existingFiles, errorContext)
+    } else {
+      // new or full rebuild without a matched template
+      prompt = buildClaudePrompt(name, description, errorContext, null)
+    }
+    templateStarted = await runBuilderContainer(dir, userId, name, prompt, logName, onStatus)
+  }
+
+  // Ensure compose file and external generation if builder was not used / failed
   if (!templateStarted) {
     writeComposeFile(dir, userId, name)
-  }
-
-  // ── Phase 2: AI code generation ───────────────────────────────────────────
-  // Runs while the template container is already serving (if Phase 1 succeeded).
-  // For patch/rebuild modes this is the only generation step.
-  try {
-    await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
-    log.info(`[${logName}] code generated`)
-  } catch (err) {
-    log.error(`[${logName}] code generation failed`, err.message)
-    throw new Error(`Code generation failed: ${err.message}`)
-  }
-
-  // ── Clean up loading artifacts before Phase 3 ────────────────────────────
-  if (templateStarted) {
-    // If AI didn't generate a Dockerfile (overwrote loading one), restore template's
-    const currentDockerfile = existsSync(join(dir, 'Dockerfile'))
-      ? readFileSync(join(dir, 'Dockerfile'), 'utf8').trim()
-      : ''
-    if (currentDockerfile === LOADING_DOCKERFILE.trim() && existsSync(join(dir, 'Dockerfile.template'))) {
-      writeFileSync(join(dir, 'Dockerfile'), readFileSync(join(dir, 'Dockerfile.template')))
-      log.build(logName, 'Restored template Dockerfile (AI did not generate one)')
-    }
-    for (const f of ['Dockerfile.template', 'loading-server.js']) {
-      try { rmSync(join(dir, f)) } catch {}
+    try {
+      await generateCode(dir, name, description, onStatus, errorContext, null, mode, templateInfo)
+      log.info(`[${logName}] code generated (external)`)
+    } catch (err) {
+      log.error(`[${logName}] code generation failed`, err.message)
+      throw new Error(`Code generation failed: ${err.message}`)
     }
   }
 
