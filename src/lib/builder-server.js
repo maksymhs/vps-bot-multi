@@ -31,10 +31,14 @@ let buildError   = null
 let filesWritten = 0
 let currentApp   = null        // child process for the running app
 const sseClients = []
+const sseBuffer  = []       // replay buffer — late-joining clients get full history
+const SSE_BUF_MAX = 300
 
 // ── SSE helpers ─────────────────────────────────────────────────────────────
 function broadcast(obj) {
   const msg = 'data: ' + JSON.stringify(obj) + '\n\n'
+  sseBuffer.push(msg)
+  if (sseBuffer.length > SSE_BUF_MAX) sseBuffer.shift()
   for (const res of sseClients) try { res.write(msg) } catch {}
 }
 
@@ -472,6 +476,10 @@ async function tryPlanExecute(description, errorContext) {
 
   broadcast({ type: 'thinking' })
 
+  // Heartbeat: keep broadcasting 'thinking' every 4s so browsers that connect mid-call
+  // immediately see the spinner rather than a blank console
+  const planHb = setInterval(function() { broadcast({ type: 'thinking' }) }, 4000)
+
   let plan
   try {
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -485,15 +493,17 @@ async function tryPlanExecute(description, errorContext) {
         response_format: { type: 'json_object' },
       }),
     })
-    if (!res.ok) { console.log('[plan] API error', res.status); return false }
+    if (!res.ok) { clearInterval(planHb); console.log('[plan] API error', res.status); return false }
     const data = await res.json()
     const raw  = data.choices?.[0]?.message?.content || ''
     // Handle both raw JSON and markdown-fenced JSON from the model
     const jsonStr = raw.match(/```(?:json)?\s*([\s\S]+?)```/)?.[1] ?? raw
     plan = JSON.parse(jsonStr.trim())
   } catch (err) {
+    clearInterval(planHb)
     console.log('[plan] parse failed:', err.message); return false
   }
+  clearInterval(planHb)
 
   const edits   = plan.edits   || []
   const creates = plan.creates || []
@@ -577,6 +587,7 @@ async function runAgenticPatch(description, errorContext, attempt) {
   for (let iter = 0; !skipToolLoop && iter < AGENT_MAX_ITERS; iter++) {
     broadcast({ type: 'thinking' })
     let response
+    const iterHb = setInterval(function() { broadcast({ type: 'thinking' }) }, 4000)
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method:  'POST',
@@ -595,15 +606,18 @@ async function runAgenticPatch(description, errorContext, attempt) {
         }),
       })
       if (!res.ok) {
+        clearInterval(iterHb)
         const txt = await res.text()
         return fail('OpenRouter ' + res.status + ': ' + txt.slice(0, 200))
       }
       const data = await res.json()
       response = data.choices[0]?.message
-      if (!response) return fail('Empty response from model')
+      if (!response) { clearInterval(iterHb); return fail('Empty response from model') }
     } catch (err) {
+      clearInterval(iterHb)
       return fail('Agent error: ' + err.message)
     }
+    clearInterval(iterHb)
 
     messages.push(response)
 
@@ -783,10 +797,7 @@ const HTML = `<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;background:#0d1117;color:#c9d1d9;font-family:'SF Mono','Fira Mono',Consolas,monospace;display:flex;flex-direction:column;overflow:hidden}
 .topbar{background:#161b22;border-bottom:1px solid #30363d;padding:10px 18px;display:flex;align-items:center;gap:8px;flex-shrink:0}
-.traffic{display:flex;gap:6px}
-.dot{width:12px;height:12px;border-radius:50%}
-.dot-r{background:#ff5f57}.dot-y{background:#ffbd2e}.dot-g{background:#28ca41}
-.title{margin-left:10px;color:#8b949e;font-size:13px}
+.title{color:#8b949e;font-size:13px}
 .title b{color:#e6edf3}
 #timer{margin-left:auto;color:#484f58;font-size:12px}
 .statbar{background:#0d1117;border-bottom:1px solid #21262d;padding:6px 18px;display:flex;gap:24px;font-size:12px;color:#484f58;flex-shrink:0}
@@ -815,11 +826,6 @@ html,body{height:100%;background:#0d1117;color:#c9d1d9;font-family:'SF Mono','Fi
 </head>
 <body>
 <div class="topbar">
-  <div class="traffic">
-    <div class="dot dot-r"></div>
-    <div class="dot dot-y"></div>
-    <div class="dot dot-g"></div>
-  </div>
   <div class="title">Building <b>${PROJECT}</b></div>
   <div id="timer">0s</div>
 </div>
@@ -1036,6 +1042,9 @@ const server = http.createServer(function(req, res) {
       'Connection':    'keep-alive',
     })
     res.write('retry: 3000\n\n')
+    // Replay history so late-joining browsers see everything that happened
+    for (const past of sseBuffer) try { res.write(past) } catch {}
+    // Current state sync (may advance past what was replayed)
     res.write('data: ' + JSON.stringify({ type: 'connected', state }) + '\n\n')
     sseClients.push(res)
     req.on('close', function() {
