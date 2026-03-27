@@ -323,63 +323,249 @@ async function runWithAutofix() {
   }
 }
 
-// ── In-container rebuild triggered via HTTP ──────────────────────────────────
-const PATCH_SKIP_CONTENT = new Set(['package-lock.json', 'yarn.lock', '.env'])
-const PATCH_MAX_FILE_CHARS = 6000
+// ── Agentic patch: tool-calling loop for surgical file edits ─────────────────
+// The agent reads files, makes targeted replacements, never rewrites entire files.
+// Mirrors Claude Code's approach: Read → Edit (old→new) → done.
 
+const AGENT_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description: 'List all project files (excludes node_modules, dist)',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read the contents of a file. Always read before editing.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'File path relative to /app' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: 'Replace an exact string in a file. old_string must match exactly (whitespace included). Use read_file first to get the exact text.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path:       { type: 'string' },
+          old_string: { type: 'string', description: 'Exact text to find — must exist verbatim in the file' },
+          new_string: { type: 'string', description: 'Replacement text' },
+        },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Write a complete file. Use ONLY for new files that do not exist yet. For existing files use edit_file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path:    { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+]
+
+const AGENT_SYSTEM = `You are a surgical code editor working on a live web app at /app.
+Apply ONLY the minimal change needed for the user's request.
+
+Workflow:
+1. Call list_files to see the project structure
+2. Call read_file on the relevant file(s)
+3. Call edit_file to make targeted replacements (never rewrite entire files)
+4. Use write_file only for brand-new files
+5. When done, stop calling tools — return a short summary of what you changed
+
+Rules:
+- Read before editing — old_string must match exactly
+- Change only what is required. Preserve everything else.
+- Never touch unrelated files
+- Keep GET /health → { status: "ok" } working
+- App must use process.env.PORT for its listen port`
+
+const AGENT_MAX_ITERS = 14
+
+async function runAgenticPatch(description) {
+  broadcast({ type: 'status', message: 'Agent is analyzing the codebase...' })
+  console.log('[agent] patch:', description)
+
+  let pkgJsonBefore = ''
+  try { pkgJsonBefore = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
+
+  const messages = [
+    { role: 'system',  content: AGENT_SYSTEM },
+    { role: 'user',    content: 'Apply this change to the web app: ' + description },
+  ]
+
+  for (let iter = 0; iter < AGENT_MAX_ITERS; iter++) {
+    let response
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method:  'POST',
+        headers: {
+          'Authorization': 'Bearer ' + OR_KEY,
+          'Content-Type':  'application/json',
+          'HTTP-Referer':  'https://vps-bot-multi.local',
+          'X-Title':       'VPS-Bot-Multi',
+        },
+        body: JSON.stringify({
+          model:       MODEL,
+          messages,
+          tools:       AGENT_TOOLS,
+          tool_choice: 'auto',
+          max_tokens:  2000,
+        }),
+      })
+      if (!res.ok) {
+        const txt = await res.text()
+        return fail('OpenRouter ' + res.status + ': ' + txt.slice(0, 200))
+      }
+      const data = await res.json()
+      response = data.choices[0]?.message
+      if (!response) return fail('Empty response from model')
+    } catch (err) {
+      return fail('Agent error: ' + err.message)
+    }
+
+    messages.push(response)
+
+    // No tool calls → agent finished
+    if (!response.tool_calls || response.tool_calls.length === 0) {
+      if (response.content) broadcast({ type: 'log', content: '✅ ' + response.content + '\n' })
+      break
+    }
+
+    // Execute tool calls
+    for (const call of response.tool_calls) {
+      let args = {}
+      try { args = JSON.parse(call.function.arguments) } catch {}
+      let result = ''
+
+      if (call.function.name === 'list_files') {
+        const files = getWorkspaceFiles()
+        result = files.join('\n')
+        broadcast({ type: 'log', content: '📂 list_files → ' + files.length + ' files\n' })
+
+      } else if (call.function.name === 'read_file') {
+        try {
+          const raw = fs.readFileSync(path.join(WORKSPACE, args.path), 'utf8')
+          result = raw.slice(0, 8000)
+          broadcast({ type: 'log', content: '📖 read  ' + args.path + '\n' })
+        } catch (err) {
+          result = 'Error: ' + err.message
+          broadcast({ type: 'log', content: '❌ read  ' + args.path + ': ' + err.message + '\n' })
+        }
+
+      } else if (call.function.name === 'edit_file') {
+        const fname = path.basename(args.path || '')
+        if (PROTECTED.has(fname)) {
+          result = 'Error: file is protected, cannot edit'
+          broadcast({ type: 'log', content: '🚫 edit  ' + args.path + ' (protected)\n' })
+        } else {
+          try {
+            const filePath = path.join(WORKSPACE, args.path)
+            const content  = fs.readFileSync(filePath, 'utf8')
+            if (!content.includes(args.old_string)) {
+              result = 'Error: old_string not found verbatim. Call read_file again to get the exact current content.'
+              broadcast({ type: 'log', content: '❌ edit  ' + args.path + ': string not found\n' })
+            } else {
+              fs.writeFileSync(filePath, content.replace(args.old_string, args.new_string))
+              filesWritten++
+              broadcast({ type: 'file', name: args.path })
+              broadcast({ type: 'log', content: '✏️  edit  ' + args.path + '\n' })
+              result = 'OK'
+            }
+          } catch (err) {
+            result = 'Error: ' + err.message
+            broadcast({ type: 'log', content: '❌ edit  ' + args.path + ': ' + err.message + '\n' })
+          }
+        }
+
+      } else if (call.function.name === 'write_file') {
+        const fname = path.basename(args.path || '')
+        if (PROTECTED.has(fname)) {
+          result = 'Error: file is protected'
+        } else {
+          try {
+            const filePath = path.join(WORKSPACE, args.path)
+            fs.mkdirSync(path.dirname(filePath), { recursive: true })
+            fs.writeFileSync(filePath, args.content)
+            filesWritten++
+            broadcast({ type: 'file', name: args.path })
+            broadcast({ type: 'log', content: '📝 write ' + args.path + '\n' })
+            result = 'OK'
+          } catch (err) {
+            result = 'Error: ' + err.message
+          }
+        }
+      } else {
+        result = 'Unknown tool'
+      }
+
+      messages.push({ role: 'tool', tool_call_id: call.id, content: result })
+    }
+  }
+
+  // ── npm install if package.json changed ────────────────────────────────────
+  state = 'installing'
+  let pkgJsonAfter = ''
+  try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
+  if (pkgJsonBefore !== pkgJsonAfter || !fs.existsSync(path.join(WORKSPACE, 'node_modules'))) {
+    broadcast({ type: 'phase', phase: 'install', message: 'Installing new dependencies...' })
+    try { await spawnStreaming('npm', ['install']) }
+    catch (err) { return fail('npm install failed: ' + err.message) }
+  }
+
+  // ── npm run build if needed ────────────────────────────────────────────────
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
+    if (pkg.scripts?.build) {
+      broadcast({ type: 'phase', phase: 'build', message: 'Rebuilding...' })
+      await spawnStreaming('npm', ['run', 'build'])
+    }
+  } catch {}
+
+  // ── Restart app ────────────────────────────────────────────────────────────
+  let startBin = 'node', startArgs = ['src/index.js']
+  try {
+    const pkg   = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
+    const parts = ((pkg.scripts?.start) || 'node src/index.js').trim().split(/\s+/)
+    startBin = parts[0]; startArgs = parts.slice(1)
+  } catch {}
+
+  broadcast({ type: 'launching', message: 'Restarting with patch applied...' })
+  const crashError = await spawnApp(startBin, startArgs)
+  if (crashError) fail('App crashed after patch:\n' + crashError.slice(-500))
+}
+
+// ── In-container rebuild triggered via HTTP ──────────────────────────────────
 async function startRebuild(description) {
   console.log('[builder] HTTP rebuild triggered:', description)
 
-  // Kill running app (only the app process, container keeps running)
-  if (currentApp) {
-    currentApp.kill('SIGTERM')
-    currentApp = null
-  }
-
-  // Read actual file contents so AI sees what exists and makes minimal changes
-  const files = getWorkspaceFiles()
-  let fileContext = ''
-  for (const f of files) {
-    if (PATCH_SKIP_CONTENT.has(path.basename(f))) continue
-    try {
-      const content = fs.readFileSync(path.join(WORKSPACE, f), 'utf8')
-      if (content.length <= PATCH_MAX_FILE_CHARS) {
-        fileContext += '\n--- FILE: ' + f + ' ---\n' + content + '\n--- END FILE ---\n'
-      } else {
-        fileContext += '\n[' + f + '] (' + content.length + ' chars — too large to show, keep unchanged unless needed)\n'
-      }
-    } catch {}
-  }
-
-  const prompt =
-    'Modify the existing application "' + PROJECT + '".\n\n' +
-    'REQUESTED CHANGES:\n' + description + '\n\n' +
-    'CURRENT FILE CONTENTS:\n' + fileContext + '\n\n' +
-    'RULES — follow strictly:\n' +
-    '1. Output ONLY files that need to change. If a file is fine, do NOT output it.\n' +
-    '2. Make MINIMAL changes — edit only the lines required by the request.\n' +
-    '3. Preserve all existing structure, logic, styles and routes not mentioned in the request.\n' +
-    '4. Keep GET /health → { status: "ok" } working.\n' +
-    '5. App MUST use process.env.PORT || 3000 for the listen port.\n' +
-    '6. ASCII only. No explanations outside code blocks.'
-
-  fs.writeFileSync(path.join(WORKSPACE, '.build-prompt.txt'), prompt)
-
-  // Reduce max tokens for patch — only a few files should change
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, '.build-config.json'), 'utf8'))
-    cfg.maxTokens = 5000
-    fs.writeFileSync(path.join(WORKSPACE, '.build-config.json'), JSON.stringify(cfg))
-  } catch {
-    fs.writeFileSync(path.join(WORKSPACE, '.build-config.json'), JSON.stringify({ maxTokens: 5000 }))
-  }
+  // Kill app process only — container keeps running
+  if (currentApp) { currentApp.kill('SIGTERM'); currentApp = null }
 
   state = 'building'
   buildError = null
   filesWritten = 0
-  broadcast({ type: 'phase', phase: 'rebuilding', message: 'Patching with AI...' })
+  broadcast({ type: 'phase', phase: 'rebuilding', message: 'Agent is reading the codebase...' })
 
-  runWithAutofix()
+  runAgenticPatch(description)
 }
 
 // ── Proxy to app running on APP_PORT ─────────────────────────────────────────
