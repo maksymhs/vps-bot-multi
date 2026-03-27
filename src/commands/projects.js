@@ -1,6 +1,7 @@
 import { execFile, execSync, spawn } from 'child_process'
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, statSync } from 'fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, statSync, copyFileSync } from 'fs'
 import { join, dirname } from 'path'
+import { tmpdir } from 'os'
 import { fileURLToPath } from 'url'
 import { getDocker } from '../lib/docker-client.js'
 import { buildingSet, pollingSet } from '../lib/build-state.js'
@@ -12,15 +13,52 @@ import { enqueueBuild, getQueuePosition } from '../lib/build-queue.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const BUILDER_SERVER_JS = readFileSync(join(__dirname, '../lib/builder-server.js'), 'utf8')
+const TEMPLATE_PKG = join(__dirname, '../../templates/next-react/package.json')
+
+// ── Pre-built base image ────────────────────────────────────────────────────
+// Built once from the template package.json so every new project inherits
+// node_modules without running npm install during docker build.
+export async function ensureBaseImage() {
+  try {
+    const images = await getDocker().listImages({
+      filters: JSON.stringify({ reference: ['vpsbot-next-base'] }),
+    })
+    if (images.length > 0) {
+      log.info('[base-image] vpsbot-next-base already exists')
+      return
+    }
+  } catch {}
+
+  log.info('[base-image] building vpsbot-next-base (first time, ~60s)...')
+  const tmpDir = mkdtempSync(join(tmpdir(), 'vpsbot-base-'))
+  try {
+    copyFileSync(TEMPLATE_PKG, join(tmpDir, 'package.json'))
+    writeFileSync(join(tmpDir, 'Dockerfile'), [
+      'FROM node:20-alpine',
+      'WORKDIR /app',
+      'COPY package.json ./',
+      'RUN --mount=type=cache,target=/root/.npm npm install',
+    ].join('\n') + '\n')
+    execSync(`DOCKER_BUILDKIT=1 docker build -t vpsbot-next-base:latest "${tmpDir}"`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 300_000,
+    })
+    log.info('[base-image] vpsbot-next-base built successfully')
+  } catch (err) {
+    log.error('[base-image] build failed — containers will install deps themselves:', err.message)
+    // Fallback: write a plain Dockerfile without the base image so builds still work
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
 
 const MAX_RETRIES = 2
 
-// Single Dockerfile: copies the full project dir (with template files + builder-server.js)
-// and runs the builder which handles generation → install → app launch internally.
-const BUILDER_DOCKERFILE = `FROM node:20-alpine
+// Single Dockerfile: inherits deps from pre-built base image — no npm install at build time.
+// node_modules come from vpsbot-next-base; builder-server.js installs new deps on demand.
+const BASE_IMAGE = 'vpsbot-next-base:latest'
+const BUILDER_DOCKERFILE = `FROM ${BASE_IMAGE}
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
 COPY . .
 EXPOSE 3000
 CMD ["node", "builder-server.js"]
@@ -309,7 +347,17 @@ async function runBuilderContainer(dir, userId, name, prompt, logName, onStatus,
     maxTokens: buildConfig.maxTokens || 14000,
   }))
   writeFileSync(join(dir, 'builder-server.js'), BUILDER_SERVER_JS)
-  writeFileSync(join(dir, 'Dockerfile'), BUILDER_DOCKERFILE)
+
+  // Use base image if available; fall back to full install Dockerfile if not
+  let dockerfile = BUILDER_DOCKERFILE
+  try {
+    const images = await getDocker().listImages({ filters: JSON.stringify({ reference: ['vpsbot-next-base'] }) })
+    if (!images.length) {
+      log.build(logName, 'Base image not found — using fallback Dockerfile with npm install')
+      dockerfile = `FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN --mount=type=cache,target=/root/.npm npm install\nCOPY . .\nEXPOSE 3000\nCMD ["node", "builder-server.js"]\n`
+    }
+  } catch {}
+  writeFileSync(join(dir, 'Dockerfile'), dockerfile)
   writeFileSync(join(dir, '.dockerignore'), '.git\nnode_modules\n*.md\n.env\n')
   writeBuilderComposeFile(dir, userId, name)
 

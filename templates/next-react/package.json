@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "next dev -p ${PORT:-3000}",
-    "build": "next build"
+    "start": "next dev -p ${PORT:-3000}"
   },
   "dependencies": {
     "next": "14.2.5",

@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import { Telegraf } from 'telegraf'
 import { execFile } from 'child_process'
-import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl, generateProjectName } from './commands/projects.js'
+import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectCommand, deployNew, deployRebuild, projectUrl, generateProjectName, ensureBaseImage } from './commands/projects.js'
 import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild } from './commands/menu.js'
 import { userStore } from './lib/user-store.js'
 import { getDocker } from './lib/docker-client.js'
@@ -495,6 +495,7 @@ bot.catch((err, ctx) => {
 bot.launch()
 reconcileSleepState().catch(err => console.error('Reconcile error:', err.message))
 startSleepManager()
+ensureBaseImage().catch(err => console.error('[base-image] error:', err.message))
 console.log(getBanner())
 
 // Check OpenRouter API key at startup

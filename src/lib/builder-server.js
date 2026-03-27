@@ -276,7 +276,7 @@ async function runAll(errorContext) {
   let pkgJsonAfter = ''
   try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
   const nodeModulesExists = fs.existsSync(path.join(WORKSPACE, 'node_modules'))
-  const depsChanged = pkgJsonBefore !== pkgJsonAfter || !nodeModulesExists
+  const depsChanged = depsKey(pkgJsonBefore) !== depsKey(pkgJsonAfter) || !nodeModulesExists
   if (depsChanged) {
     broadcast({ type: 'phase', phase: 'install', message: 'Installing dependencies...' })
     try {
@@ -300,14 +300,12 @@ async function runAll(errorContext) {
   } catch {}
 
   // ── 5. Resolve start command ─────────────────────────────────────────────────
+  // Always use `npm start` so npm injects node_modules/.bin into PATH automatically.
   let startBin  = 'node'
   let startArgs = ['src/index.js']
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
-    const startScript = (pkg.scripts && pkg.scripts.start) || 'node src/index.js'
-    const parts = startScript.trim().split(/\s+/)
-    startBin  = parts[0]
-    startArgs = parts.slice(1)
+    if (pkg.scripts && pkg.scripts.start) { startBin = 'npm'; startArgs = ['start'] }
   } catch {}
 
   // ── 6. Launch app on APP_PORT (builder stays alive as proxy on PORT) ─────────
@@ -340,9 +338,8 @@ async function runWithAutofix() {
       const hasModules = fs.existsSync(path.join(WORKSPACE, 'node_modules'))
       const noBuildStep = !(pkg.scripts && pkg.scripts.build)
       if (noBuildStep && hasModules && pkg.scripts && pkg.scripts.start) {
-        const parts = pkg.scripts.start.trim().split(/\s+/)
         broadcast({ type: 'log', content: '▸ Boilerplate is live — agent customising in background...\n' })
-        spawnApp(parts[0], parts.slice(1))  // fire-and-forget: sets state='running'
+        spawnApp('npm', ['start'])  // fire-and-forget: npm resolves node_modules/.bin
       }
     } catch {}
 
@@ -576,6 +573,14 @@ async function tryPlanExecute(description, errorContext) {
   return allOk
 }
 
+// Compare only dep sections so a name/version bump doesn't trigger a full reinstall
+function depsKey(pkgJson) {
+  try {
+    const p = JSON.parse(pkgJson)
+    return JSON.stringify({ d: p.dependencies || {}, dd: p.devDependencies || {} })
+  } catch { return pkgJson }
+}
+
 async function runAgenticPatch(description, errorContext, attempt) {
   if (attempt === undefined) attempt = 0
   const isRetry = attempt > 0
@@ -735,7 +740,7 @@ async function runAgenticPatch(description, errorContext, attempt) {
   currentPhase = 'installing'
   let pkgJsonAfter = ''
   try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
-  if (pkgJsonBefore !== pkgJsonAfter || !fs.existsSync(path.join(WORKSPACE, 'node_modules'))) {
+  if (depsKey(pkgJsonBefore) !== depsKey(pkgJsonAfter) || !fs.existsSync(path.join(WORKSPACE, 'node_modules'))) {
     broadcast({ type: 'phase', phase: 'install', message: 'Installing new dependencies...' })
     try { await spawnStreaming('npm', ['install'], true) }
     catch (err) {
@@ -746,11 +751,11 @@ async function runAgenticPatch(description, errorContext, attempt) {
   }
 
   // ── npm run build if needed — capture output for error feedback ─────────────
+  // Always launch via `npm start` — npm resolves node_modules/.bin automatically
   let startBin = 'node', startArgs = ['src/index.js']
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
-    startBin  = pkg.scripts?.start ? pkg.scripts.start.trim().split(/\s+/)[0] : 'node'
-    startArgs = pkg.scripts?.start ? pkg.scripts.start.trim().split(/\s+/).slice(1) : ['src/index.js']
+    if (pkg.scripts?.start) { startBin = 'npm'; startArgs = ['start'] }
     if (pkg.scripts?.build) {
       currentPhase = 'building'
       broadcast({ type: 'phase', phase: 'build', message: isRetry ? 'Rebuilding after fix...' : 'Building...' })
