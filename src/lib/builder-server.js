@@ -325,6 +325,20 @@ async function runWithAutofix() {
     // Template builds and HTTP rebuilds both use the agentic agent
     let description = ''
     try { description = fs.readFileSync(path.join(WORKSPACE, '.build-prompt.txt'), 'utf8') } catch {}
+
+    // Pre-launch boilerplate immediately for templates that need no build step
+    // so there is something visible at the URL while the agent customises in background
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
+      const hasModules = fs.existsSync(path.join(WORKSPACE, 'node_modules'))
+      const noBuildStep = !(pkg.scripts && pkg.scripts.build)
+      if (noBuildStep && hasModules && pkg.scripts && pkg.scripts.start) {
+        const parts = pkg.scripts.start.trim().split(/\s+/)
+        broadcast({ type: 'log', content: '▸ Boilerplate is live — agent customising in background...\n' })
+        spawnApp(parts[0], parts.slice(1))  // fire-and-forget: sets state='running'
+      }
+    } catch {}
+
     await runAgenticPatch(description)
     return
   }
@@ -741,6 +755,8 @@ async function runAgenticPatch(description, errorContext, attempt) {
   } catch {}
 
   // ── Launch app — retry with crash log if it dies quickly ──────────────────
+  // Kill any pre-launched boilerplate (or previous patched version) before spawning
+  if (currentApp) { currentApp.kill('SIGTERM'); currentApp = null }
   broadcast({ type: 'launching', message: isRetry ? 'Relaunching after fix...' : 'Launching app...' })
   const crashError = await spawnApp(startBin, startArgs)
   if (crashError) {

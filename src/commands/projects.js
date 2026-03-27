@@ -1180,15 +1180,15 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
   ]
 
   if (result === 'async' && mode === 'patch') {
-    text = `🔨 *${name}* is being patched\n🌐 ${url}\n\n_Watch the changes live — tap the button below._`
+    text = `🔨 *${name}* is being patched\n🖥 [Watch live](${url}/console)\n\n_When done the page reloads to the updated app automatically._`
     keyboard = Markup.inlineKeyboard([
       [Markup.button.url('👁 Watch Live', url + '/console')],
       ...baseButtons,
     ])
   } else if (result === 'async') {
-    text = `🚀 *${name}*\n🌐 ${url}\n\n_App is building live — tap Watch Live to follow progress._`
+    text = `🚀 *${name}*\n🖥 [Watch build](${url}/console)\n\n_Boilerplate is live — tap to watch the agent customise it. Redirects to app when done._`
     keyboard = Markup.inlineKeyboard([
-      [Markup.button.url('👁 Watch Live', url + '/console')],
+      [Markup.button.url('👁 Watch Build', url + '/console')],
       ...baseButtons,
     ])
   } else {
