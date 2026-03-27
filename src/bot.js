@@ -5,7 +5,7 @@ import { newCommand, rebuildCommand, listCommand, urlCommand, deleteProjectComma
 import { showMain, showList, showProject, showDeleteConfirm, startNewFlow, pendingNew, startRebuildFlow, startRebuildPatch, startRebuildFull, pendingRebuild } from './commands/menu.js'
 import { userStore } from './lib/user-store.js'
 import { getDocker } from './lib/docker-client.js'
-import { buildingSet } from './lib/build-state.js'
+import { buildingSet, pollingSet } from './lib/build-state.js'
 import { config } from './lib/config.js'
 import { enqueueBuild, getQueueStatus } from './lib/build-queue.js'
 import { getBanner } from './lib/branding.js'
@@ -178,7 +178,7 @@ bot.on('text', async (ctx, next) => {
       const description = `${project.description}\n\nRequested changes: ${input}`
       const slug = userStore.getUserSlug(userId)
       const buildKey = `${slug}-${lastProject}`
-      if (buildingSet.has(buildKey)) {
+      if (buildingSet.has(buildKey) || pollingSet.has(buildKey)) {
         // Queue the change — will be applied automatically when the current build finishes
         const q = changeQueue.get(String(userId)) || []
         q.push({ description, input, ctx })

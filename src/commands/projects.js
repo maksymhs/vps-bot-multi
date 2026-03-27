@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { getDocker } from '../lib/docker-client.js'
-import { buildingSet } from '../lib/build-state.js'
+import { buildingSet, pollingSet } from '../lib/build-state.js'
 import { config } from '../lib/config.js'
 import { userStore } from '../lib/user-store.js'
 import { log } from '../lib/logger.js'
@@ -1064,11 +1064,11 @@ async function buildAndVerify(dir, userId, name, description, onStatus, errorCon
   }
 
   // ── Builder is self-managing: generation → install → launch inside container ─
-  // Return immediately. The user watches progress at the URL in their browser.
+  // Return 'async' so callers know to fire pollUntilReady.
   if (builderResult === 'async') {
     const url = projectUrl(userId, name)
     log.build(logName, `=== ASYNC DEPLOY === ${url}`)
-    return
+    return 'async'
   }
 
   // ── Fallback: external generation + docker rebuild ────────────────────────
@@ -1231,6 +1231,8 @@ function buildProgressText(name, url, phase, userInput) {
 // then show completion message with applied change + "type next change" hint.
 async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
   if (!loadingMsg) return
+  const buildKey = `${userStore.getUserSlug(userId)}-${name}`
+  pollingSet.add(buildKey)   // mark as "build running inside container"
   const containerName = userStore.containerName(userId, name)
   // Wait for container IP (may take a couple seconds on first boot)
   let host = null
@@ -1239,9 +1241,21 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
     if (host) break
     await new Promise(r => setTimeout(r, 2000))
   }
-  if (!host) return
+  if (!host) { pollingSet.delete(buildKey); return }
   const url = projectUrl(userId, name)
   let lastPhase = null
+
+  // Helper to dequeue and fire the next pending change for this project
+  const processQueue = () => {
+    const uid = String(userId)
+    const queue = changeQueue.get(uid) || []
+    const next = queue.shift()
+    if (!next) return
+    changeQueue.set(uid, queue)
+    const nextKey = `${userStore.getUserSlug(next.ctx.from.id)}-${name}`
+    enqueueBuild(nextKey, () => deployRebuild(next.ctx, name, next.description, null, 'patch', next.input))
+      .finally(() => buildingSet.delete(nextKey))
+  }
 
   // Poll /health every 3s for up to 5 minutes
   for (let i = 0; i < 100; i++) {
@@ -1259,7 +1273,7 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
         lastPhase = phase
         const { Markup } = await import('telegraf')
         const progressKeyboard = userInput
-          ? []  // no button needed for conversational changes — already compact
+          ? []  // conversational: no extra button, message is already compact
           : [[Markup.button.url('👁 Watch Live', url + '/console')]]
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
@@ -1269,16 +1283,17 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
       }
 
       if (data.state === 'running') {
+        pollingSet.delete(buildKey)
         const { Markup } = await import('telegraf')
         let completionText, completionKeyboard
 
         if (userInput) {
           // Conversational change — compact: no URL, just confirmation + hint
           completionText =
-            `✅ _"${userInput.slice(0, 70)}"_ applied to *${name}*\n\n` +
-            `_Visible on the web now. Keep typing changes._`
+            `✅ _"${userInput.slice(0, 70)}"_ aplicado a *${name}*\n\n` +
+            `_Ya visible en la web. Sigue escribiendo cambios o usa el menú._`
           completionKeyboard = Markup.inlineKeyboard([
-            [Markup.button.url('🔗 Open app', url), Markup.button.callback('📋 Logs', `lg:${name}`)],
+            [Markup.button.url('🔗 Abrir app', url), Markup.button.callback('📋 Logs', `lg:${name}`), Markup.button.callback('⬅️ Menú', 'main')],
           ])
         } else {
           // Menu-triggered rebuild or new project — full message with URL
@@ -1296,31 +1311,25 @@ async function pollUntilReady(ctx, userId, name, loadingMsg, userInput) {
           { parse_mode: 'Markdown', ...completionKeyboard }
         ).catch(() => {})
 
-        // Process any change queued while this build was running
-        const uid = String(userId)
-        const queue = changeQueue.get(uid) || []
-        const next = queue.shift()
-        if (next) {
-          changeQueue.set(uid, queue)
-          const buildKey = `${userStore.getUserSlug(next.ctx.from.id)}-${name}`
-          buildingSet.add(buildKey)
-          enqueueBuild(buildKey, () => deployRebuild(next.ctx, name, next.description, null, 'patch', next.input))
-            .finally(() => buildingSet.delete(buildKey))
-        }
+        processQueue()
         return
       }
 
       if (data.state === 'error') {
+        pollingSet.delete(buildKey)
         const { Markup } = await import('telegraf')
         await ctx.telegram.editMessageText(
           loadingMsg.chat.id, loadingMsg.message_id, null,
           `❌ *${name}* build failed\n_[View error log](${url}/console)_`,
           { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.url('📋 Error log', url + '/console')]]) }
         ).catch(() => {})
+        processQueue()
         return
       }
     } catch { /* container not ready yet, keep polling */ }
   }
+  // Timeout — clean up
+  pollingSet.delete(buildKey)
 }
 
 export async function deployNew(ctx, name, description, model = null) {
