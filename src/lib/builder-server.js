@@ -790,19 +790,81 @@ async function startRebuild(description) {
 }
 
 // Script injected into every HTML page served by the proxy.
-// Polls /health every 2s; when a rebuild starts it redirects automatically to /console.
-// /console already auto-reloads the app when the build finishes — zero user interaction needed.
-const REBUILD_WATCHER = '<script>' +
-'(function(){' +
-'function chk(){' +
-'fetch("/health").then(function(r){return r.json()}).then(function(d){' +
-'if(d.state==="building"||d.state==="installing"){window.location.href="/console";return}' +
-'setTimeout(chk,2000)' +
-'}).catch(function(){setTimeout(chk,3000)})' +
-'}' +
-'setTimeout(chk,2000)' +
-'})()' +
-'</script>'
+// ── Overlay rebuild watcher injected into every proxied HTML page ────────────
+// Polls /health every 2s. When a rebuild starts, slides up a live-progress panel
+// (no redirect — user stays on the page). When done, hides panel + reloads in-place.
+const REBUILD_WATCHER = `<script>
+(function(){
+var OV=null,ES=null,LIVE=null,SP=['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'],si=0,st=null
+
+function show(){
+  if(OV)return
+  OV=document.createElement('div')
+  OV.style.cssText='position:fixed;bottom:0;left:0;right:0;height:260px;background:#0d1117;color:#c9d1d9;font:12px/1.6 monospace;z-index:2147483647;display:flex;flex-direction:column;border-top:2px solid #1f6feb;box-shadow:0 -4px 24px #0008;transform:translateY(100%);transition:transform .25s ease'
+  var hd=document.createElement('div')
+  hd.style.cssText='background:#161b22;padding:7px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #30363d;flex-shrink:0'
+  hd.innerHTML='<span style="color:#58a6ff;font-weight:600">🔨 Building ${PROJECT}...</span><a onclick="this.closest(\\'[style*=fixed]\\').style.transform=\\'translateY(100%)\\'" style="cursor:pointer;color:#8b949e;font-size:16px;text-decoration:none">✕</a>'
+  var lg=document.createElement('div')
+  lg.id='_vb_log'
+  lg.style.cssText='flex:1;overflow-y:auto;padding:8px 16px'
+  OV.appendChild(hd);OV.appendChild(lg)
+  document.body.appendChild(OV)
+  requestAnimationFrame(function(){OV.style.transform='translateY(0)'})
+}
+function hide(){
+  if(!OV)return
+  OV.style.transform='translateY(100%)'
+  setTimeout(function(){if(OV){OV.remove();OV=null}},300)
+}
+function log(txt,col){
+  var lg=document.getElementById('_vb_log');if(!lg)return
+  if(LIVE){LIVE.remove();LIVE=null}
+  var d=document.createElement('div');d.style.color=col||'#8b949e';d.textContent=txt
+  lg.appendChild(d);lg.scrollTop=lg.scrollHeight
+}
+function live(txt){
+  var lg=document.getElementById('_vb_log');if(!lg)return
+  if(!LIVE){LIVE=document.createElement('div');LIVE.style.color='#58a6ff';lg.appendChild(LIVE)}
+  LIVE.textContent=SP[si%SP.length]+' '+txt;lg.scrollTop=lg.scrollHeight
+  if(!st)st=setInterval(function(){si++;if(LIVE)LIVE.textContent=SP[si%SP.length]+' '+txt},80)
+}
+function endLive(txt,ok){
+  if(st){clearInterval(st);st=null}
+  if(LIVE){LIVE.remove();LIVE=null}
+  log(txt,ok?'#3fb950':'#f85149')
+}
+function watch(){
+  show()
+  if(ES){ES.close()}
+  ES=new EventSource('/events')
+  ES.onmessage=function(e){
+    var d=JSON.parse(e.data)
+    if(d.type==='connected')return
+    if(d.type==='thinking')live('Agent thinking...')
+    else if(d.type==='tool_start')live(d.tool.replace(/_/g,' ')+(d.label?' '+d.label:'')+'...')
+    else if(d.type==='tool_done')endLive(d.icon+' '+d.text,d.ok)
+    else if(d.type==='status')log('> '+d.message,'#58a6ff')
+    else if(d.type==='phase')log('── '+d.message,'#58a6ff')
+    else if(d.type==='log'){var ls=d.content.split('\\n');for(var i=0;i<ls.length;i++)if(ls[i])log(ls[i])}
+    else if(d.type==='running'||d.type==='launching'){
+      endLive(null,true)
+      log('── '+d.message,'#3fb950')
+      ES.close()
+      setTimeout(function(){hide();window.location.replace('/?_='+Date.now())},1200)
+    }
+    else if(d.type==='error'){endLive('✗ '+d.message,false)}
+  }
+  ES.onerror=function(){ES.close()}
+}
+function chk(){
+  fetch('/health').then(function(r){return r.json()}).then(function(d){
+    if(d.state==='building'||d.state==='installing'){watch();return}
+    setTimeout(chk,2000)
+  }).catch(function(){setTimeout(chk,3000)})
+}
+setTimeout(chk,1500)
+})()
+</script>`
 
 // ── Proxy to app running on APP_PORT ─────────────────────────────────────────
 function proxyToApp(req, res) {
