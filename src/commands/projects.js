@@ -1232,19 +1232,22 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
 // Progress bar helpers for Telegram build status messages
 const PHASE_STEPS = { starting: 1, thinking: 3, editing: 5, installing: 7, building: 8, launching: 9, running: 10 }
 const PHASE_LABEL = { thinking: 'Agent thinking', editing: 'Applying changes', installing: 'Installing deps', building: 'Building', launching: 'Launching', starting: 'Starting' }
-// Visible dot-pulse animation that works in all Telegram clients
-const DOTS = ['   ','·  ','·· ','···']
+// Clock emoji cycles 12 frames — gives a clear spinning animation every 3s edit
+const CLOCK = ['🕐','🕑','🕒','🕓','🕔','🕕','🕖','🕗','🕘','🕙','🕚','🕛']
 // Escape special chars for Telegram MarkdownV2
 function mdv2(s) { return String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&') }
 function buildProgressText(name, url, phase, userInput, tick) {
   const n = PHASE_STEPS[phase] ?? 1
   const bar = '▓'.repeat(n) + '░'.repeat(10 - n)
-  const dots = DOTS[(tick || 0) % DOTS.length]
+  const clock = CLOCK[(tick || 0) % CLOCK.length]
   const label = PHASE_LABEL[phase] || 'Working'
+  // URL displayed inline next to the hammer — escape for MarkdownV2 link text
+  const urlShort = mdv2(url.replace(/^https?:\/\//, ''))
+  const urlLink = `[🔗 ${urlShort}](${url})`
   if (userInput) {
-    return `🔨 *${mdv2(name)}* — _"${mdv2(userInput.slice(0, 55))}"_\n\`${bar}\` ${label}${dots}\n[🌐 Watch live](${url})`
+    return `🔨 *${mdv2(name)}* — _"${mdv2(userInput.slice(0, 45))}"_ ${urlLink}\n\`${bar}\` ${clock} ${label}`
   }
-  return `⏳ *${mdv2(name)}*\n\`${bar}\` ${label}${dots}\n[🌐 Watch live](${url})`
+  return `🔨 *${mdv2(name)}* ${urlLink}\n\`${bar}\` ${clock} ${label}`
 }
 
 // Poll container /health in background; update Telegram message with progress bar,

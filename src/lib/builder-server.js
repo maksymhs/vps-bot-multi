@@ -872,7 +872,7 @@ async function startRebuild(description) {
 // (no redirect — user stays on the page). When done, hides panel + reloads in-place.
 const REBUILD_WATCHER = `<script>
 (function(){
-var panel=null,log=null,es=null,prev='running',lastLogType=''
+var panel=null,log=null,es=null,prev='running',lastLogType='',sawBuilding=false
 var LABELS={thinking:'Agent thinking…',editing:'Applying changes…',installing:'Installing packages…',building:'Building…',launching:'Launching…',running:'Done',error:'Error'}
 function createPanel(){
   if(panel)return
@@ -907,7 +907,10 @@ function startSSE(){
     es.onmessage=function(e){
       try{
         var d=JSON.parse(e.data)
-        if(d.state==='running'){hidePanel();window.location.reload();return}
+        // Only reload on running if we saw a build start in this session —
+        // prevents reload loop when SSE reconnects and replays old state:running from buffer
+        if(d.state==='building'||d.state==='installing')sawBuilding=true
+        if(d.state==='running'){if(sawBuilding){hidePanel();window.location.reload()}return}
         if(d.type==='phase')setPhase(d.phase)
         if(d.type==='thinking'&&lastLogType!=='thinking'){appendLog('💭 Thinking…')}
         if(d.type==='tool_start'&&d.tool)appendLog('🔧 '+d.tool+(d.label?' — '+d.label:''))
@@ -918,13 +921,13 @@ function startSSE(){
         if(d.state==='error'){setPhase('error')}
       }catch(ex){}
     }
-    es.onerror=function(){es.close();es=null;setTimeout(startSSE,3000)}
+    es.onerror=function(){sawBuilding=false;es.close();es=null;setTimeout(startSSE,3000)}
   }catch(ex){}
 }
 function poll(){
   fetch('/health').then(function(r){return r.json()}).then(function(d){
     if(prev==='running'&&(d.state==='building'||d.state==='installing')){
-      createPanel();startSSE()
+      sawBuilding=true;createPanel();startSSE()
     }
     if((prev==='building'||prev==='installing')&&d.state==='running'){
       hidePanel();window.location.reload();return
