@@ -189,7 +189,8 @@ function spawnApp(bin, args) {
       if (settled) return
       state = 'running'
       currentPhase = 'running'
-      broadcast({ type: 'ready', state: 'running' })  // tells loading page / watcher to reload
+      // needsReload:true → app process was (re)started, browser must reload to get new bundle
+      broadcast({ type: 'ready', state: 'running', needsReload: true })
     })
   })
 }
@@ -793,53 +794,46 @@ async function runAgenticPatch(description, errorContext, attempt) {
     }
   }
 
-  // ── npm install if package.json changed ────────────────────────────────────
-  state = 'installing'
-  currentPhase = 'installing'
+  // ── After AI edits: decide whether to hot-reload (HMR) or fully restart ─────
   let pkgJsonAfter = ''
   try { pkgJsonAfter = fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8') } catch {}
-  if (depsKey(pkgJsonBefore) !== depsKey(pkgJsonAfter) || !fs.existsSync(path.join(WORKSPACE, 'node_modules'))) {
+  const nodeModsExist  = fs.existsSync(path.join(WORKSPACE, 'node_modules'))
+  const depsChanged    = depsKey(pkgJsonBefore) !== depsKey(pkgJsonAfter) || !nodeModsExist
+
+  if (!depsChanged && currentApp) {
+    // ── Hot path: only source files changed, next dev HMR handles it ──────────
+    // No kill, no restart — the browser will update in-place via React Fast Refresh.
+    broadcast({ type: 'status', message: '✅ Changes applied — updating via HMR...' })
+    state = 'running'
+    currentPhase = 'running'
+    broadcast({ type: 'ready', state: 'running', needsReload: false })
+    return
+  }
+
+  // ── Cold path: deps changed or app not running — must install & restart ─────
+  if (depsChanged) {
+    state = 'installing'
+    currentPhase = 'installing'
     broadcast({ type: 'phase', phase: 'install', message: 'Installing new dependencies...' })
+    if (currentApp) {
+      killCurrentApp()
+      await new Promise(function(r) { setTimeout(r, 800) })
+    }
     try { await spawnStreaming('npm', ['install'], true) }
     catch (err) {
       const out = (err.output || err.message).slice(0, 2000)
       if (attempt < MAX_FIX_ATTEMPTS) return runAgenticPatch(description, 'NPM INSTALL FAILED:\n' + out, attempt + 1)
       return fail('npm install failed after ' + (attempt + 1) + ' attempts')
     }
-  }
-
-  // ── npm run build if needed — capture output for error feedback ─────────────
-  // Always launch via `npm start` — npm resolves node_modules/.bin automatically
-  let startBin = 'node', startArgs = ['src/index.js']
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'package.json'), 'utf8'))
-    if (pkg.scripts?.start) { startBin = 'npm'; startArgs = ['start'] }
-    if (pkg.scripts?.build) {
-      currentPhase = 'building'
-      broadcast({ type: 'phase', phase: 'build', message: isRetry ? 'Rebuilding after fix...' : 'Building...' })
-      try {
-        await spawnStreaming('npm', ['run', 'build'], true)
-      } catch (err) {
-        const out = (err.output || err.message).slice(0, 2500)
-        if (attempt < MAX_FIX_ATTEMPTS) {
-          broadcast({ type: 'log', content: '❌ Build failed — asking agent to fix...\n' })
-          return runAgenticPatch(description, 'BUILD ERROR (fix this before anything else):\n' + out, attempt + 1)
-        }
-        return fail('Build failed after ' + (attempt + 1) + ' fix attempts:\n' + out.slice(-600))
-      }
-    }
-  } catch {}
-
-  // ── Launch app — retry with crash log if it dies quickly ──────────────────
-  // Kill any pre-launched boilerplate (or previous patched version) before spawning.
-  // Wait briefly so the OS frees port 3001 before the new process binds it.
-  if (currentApp) {
-    killCurrentApp()  // kills npm + sh + next dev (entire process group)
+  } else if (currentApp) {
+    killCurrentApp()
     await new Promise(function(r) { setTimeout(r, 800) })
   }
+
+  const startBin = 'npm', startArgs = ['start']
   currentPhase = 'launching'
   broadcast({ type: 'launching', message: isRetry ? 'Relaunching after fix...' : 'Launching app...' })
-  const crashError = await spawnApp(startBin, startArgs)
+  const crashError = await spawnApp(startBin, startArgs)   // broadcasts needsReload:true when ready
   if (crashError) {
     if (attempt < MAX_FIX_ATTEMPTS) {
       broadcast({ type: 'log', content: '❌ App crashed — asking agent to fix...\n' })
@@ -853,8 +847,8 @@ async function runAgenticPatch(description, errorContext, attempt) {
 async function startRebuild(description) {
   console.log('[builder] HTTP rebuild triggered:', description)
 
-  // Kill app process only — container keeps running
-  killCurrentApp()
+  // Don't kill the app — it keeps serving the current version while AI edits files.
+  // next dev HMR will pick up changes automatically. We only restart if deps change.
 
   state = 'building'
   buildError = null
@@ -910,7 +904,18 @@ function startSSE(){
         // Only reload on running if we saw a build start in this session —
         // prevents reload loop when SSE reconnects and replays old state:running from buffer
         if(d.state==='building'||d.state==='installing')sawBuilding=true
-        if(d.state==='running'){if(sawBuilding){hidePanel();window.location.reload()}return}
+        if(d.state==='running'){
+          if(sawBuilding){
+            if(d.needsReload){
+              // App process restarted (deps changed) — must reload to get new JS bundle
+              hidePanel();setTimeout(function(){window.location.reload()},300)
+            } else {
+              // File-only change — next dev HMR already applied it, just close panel
+              hidePanel()
+            }
+          }
+          return
+        }
         if(d.type==='phase')setPhase(d.phase)
         if(d.type==='thinking'&&lastLogType!=='thinking'){appendLog('💭 Thinking…')}
         if(d.type==='tool_start'&&d.tool)appendLog('🔧 '+d.tool+(d.label?' — '+d.label:''))
@@ -930,7 +935,8 @@ function poll(){
       sawBuilding=true;createPanel();startSSE()
     }
     if((prev==='building'||prev==='installing')&&d.state==='running'){
-      hidePanel();window.location.reload();return
+      // Poll fallback: no needsReload info available, reload to be safe
+      hidePanel();setTimeout(function(){window.location.reload()},300);return
     }
     prev=d.state
     setTimeout(poll,2000)
@@ -989,7 +995,7 @@ function proxyToApp(req, res) {
   req.pipe(proxy)
 }
 
-// ── Loading page (shown while building, auto-redirects when app is ready) ────
+// ── Loading page (shown while building, auto-reloads when app is ready) ───────
 const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -999,72 +1005,60 @@ const HTML = `<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;background:#0f0f11;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;flex-direction:column;overflow:hidden}
-.hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;min-height:0}
-.ring{width:44px;height:44px;border:3px solid #27272a;border-top-color:#6366f1;border-radius:50%;animation:sp .75s linear infinite}
-@keyframes sp{to{transform:rotate(360deg)}}
-.name{font-size:18px;font-weight:600;color:#fafafa}
-.phase{font-size:13px;color:#71717a;letter-spacing:.2px;transition:color .3s}
+.topbar{padding:12px 16px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1c1c1f;flex-shrink:0}
+.dot{width:8px;height:8px;border-radius:50%;background:#6366f1;animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}
+.topname{font-size:13px;font-weight:600;color:#a1a1aa}
+.phase{font-size:12px;color:#3f3f46;margin-left:auto}
 .phase.error{color:#f87171}
-.logbox{height:200px;flex-shrink:0;border-top:1px solid #27272a;background:#09090b;display:flex;flex-direction:column}
-.loghdr{font-size:10px;color:#52525b;padding:4px 12px;border-bottom:1px solid #1a1a1f;letter-spacing:.5px;text-transform:uppercase;flex-shrink:0}
-.loglines{flex:1;overflow-y:auto;padding:6px 12px;font-size:11px;line-height:1.6;color:#71717a;font-family:ui-monospace,SFMono-Regular,monospace}
+.logbox{flex:1;display:flex;flex-direction:column;min-height:0;background:#09090b}
+.loghdr{font-size:10px;color:#3f3f46;padding:4px 12px;letter-spacing:.5px;text-transform:uppercase;flex-shrink:0}
+.loglines{flex:1;overflow-y:auto;padding:4px 12px 12px;font-size:11px;line-height:1.7;color:#52525b;font-family:ui-monospace,SFMono-Regular,monospace}
 .loglines div{white-space:pre-wrap;word-break:break-all}
+.loglines div.hi{color:#71717a}
 </style>
 </head>
 <body>
-<div class="hero">
-  <div class="ring" id="ring"></div>
-  <div class="name">${PROJECT}</div>
-  <div class="phase" id="ph">Starting…</div>
+<div class="topbar">
+  <div class="dot"></div>
+  <div class="topname">${PROJECT}</div>
+  <div class="phase" id="ph">Building…</div>
 </div>
 <div class="logbox">
   <div class="loghdr">Build log</div>
   <div class="loglines" id="log"></div>
 </div>
 <script>
-var LABELS={thinking:'Thinking…',editing:'Applying changes…',installing:'Installing packages…',building:'Building…',launching:'Launching…',running:'Ready!',error:'Build failed'}
+var LABELS={thinking:'Thinking…',editing:'Editing files…',installing:'Installing…',building:'Building…',launching:'Launching…',running:'Ready',error:'Error'}
 var logEl=document.getElementById('log')
 var phEl=document.getElementById('ph')
-var es=null,lastLogType=''
-
-function appendLog(txt){
-  var d=document.createElement('div');d.textContent=txt;logEl.appendChild(d)
-  logEl.scrollTop=logEl.scrollHeight
-}
+var lastLogType=''
+function appendLog(txt,hi){if(!txt)return;var d=document.createElement('div');if(hi)d.className='hi';d.textContent=txt;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight}
 function setPhase(ph){phEl.textContent=LABELS[ph]||ph;phEl.className='phase'+(ph==='error'?' error':'')}
-
-function startSSE(){
+var es=new EventSource('/events')
+es.onmessage=function(e){
   try{
-    es=new EventSource('/events')
-    es.onmessage=function(e){
-      try{
-        var d=JSON.parse(e.data)
-        if(d.state==='running'){window.location.reload();return}
-        if(d.type==='connected')setPhase(d.state||'building')
-        if(d.type==='phase')setPhase(d.phase)
-        if(d.type==='thinking'&&lastLogType!=='thinking')appendLog('💭 Thinking…')
-        if(d.type==='tool_start'&&d.tool)appendLog('🔧 '+d.tool+(d.label?' — '+d.label:''))
-        if(d.type==='tool_done'&&d.text)appendLog((d.icon||'✓')+' '+d.text)
-        if(d.type==='status'&&d.message)appendLog(d.message)
-        if(d.type==='log'&&d.content)appendLog(d.content.trim())
-        lastLogType=d.type
-        if(d.state==='error')setPhase('error')
-      }catch(ex){}
-    }
-    es.onerror=function(){es.close();es=null;setTimeout(fallbackPoll,3000)}
-  }catch(ex){fallbackPoll()}
+    var d=JSON.parse(e.data)
+    if(d.state==='running'){window.location.reload();return}
+    if(d.type==='connected')setPhase(d.state||'building')
+    if(d.type==='phase')setPhase(d.phase)
+    if(d.type==='thinking'&&lastLogType!=='thinking')appendLog('💭 Thinking…',true)
+    if(d.type==='tool_start'&&d.tool)appendLog('🔧 '+d.tool+(d.label?' — '+d.label:''),true)
+    if(d.type==='tool_done'&&d.text)appendLog((d.icon||'✓')+' '+d.text)
+    if(d.type==='status'&&d.message)appendLog(d.message)
+    if(d.type==='log'&&d.content)appendLog(d.content.trim())
+    lastLogType=d.type
+    if(d.state==='error')setPhase('error')
+  }catch(ex){}
 }
-
-function fallbackPoll(){
-  fetch('/health').then(function(r){return r.json()}).then(function(d){
+es.onerror=function(){
+  es.close()
+  ;(function poll(){fetch('/health').then(function(r){return r.json()}).then(function(d){
     setPhase(d.phase||d.state||'building')
     if(d.state==='running'){window.location.reload();return}
-    if(d.state==='error')return
-    setTimeout(fallbackPoll,2000)
-  }).catch(function(){setTimeout(fallbackPoll,3000)})
+    if(d.state!=='error')setTimeout(poll,2000)
+  }).catch(function(){setTimeout(poll,3000)})})()
 }
-
-startSSE()
 </script>
 </body>
 </html>`

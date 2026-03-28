@@ -1230,20 +1230,27 @@ async function sendProjectMessage(ctx, name, result, loadingMsg = null, mode = '
 }
 
 // Progress bar helpers for Telegram build status messages
-const PHASE_STEPS = { starting: 1, thinking: 3, editing: 5, installing: 7, building: 8, launching: 9, running: 10 }
-const PHASE_LABEL = { thinking: 'Agent thinking', editing: 'Applying changes', installing: 'Installing deps', building: 'Building', launching: 'Launching', starting: 'Starting' }
-// Clock emoji cycles 12 frames — gives a clear spinning animation every 3s edit
+// Each phase has a base fill and an oscillation range — the bar breathes back and forth
+// giving constant visible movement every 3s edit, even when phase doesn't change.
+const PHASE_BASE  = { starting:0, thinking:1, editing:4, installing:6, building:7, launching:8 }
+const PHASE_RANGE = { starting:2, thinking:3, editing:2, installing:2, building:2, launching:2 }
+const PHASE_LABEL = { thinking:'Agent thinking', editing:'Applying changes', installing:'Installing deps', building:'Building', launching:'Launching', starting:'Starting' }
 const CLOCK = ['🕐','🕑','🕒','🕓','🕔','🕕','🕖','🕗','🕘','🕙','🕚','🕛']
-// Escape special chars for Telegram MarkdownV2
 function mdv2(s) { return String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&') }
+// Triangle-wave oscillation: 0→range→0→range…
+function oscFill(phase, tick) {
+  const base  = PHASE_BASE[phase]  ?? 1
+  const range = PHASE_RANGE[phase] ?? 2
+  const t = (tick || 0) % (2 * range)
+  return Math.min(10, base + (t < range ? t : 2 * range - t))
+}
 function buildProgressText(name, url, phase, userInput, tick) {
-  const n = PHASE_STEPS[phase] ?? 1
-  const bar = '▓'.repeat(n) + '░'.repeat(10 - n)
+  const n     = oscFill(phase, tick)
+  const bar   = '▓'.repeat(n) + '░'.repeat(10 - n)
   const clock = CLOCK[(tick || 0) % CLOCK.length]
   const label = PHASE_LABEL[phase] || 'Working'
   const urlShort = mdv2(url.replace(/^https?:\/\//, ''))
-  const urlLink = `[🔨  ${urlShort}](${url})`
-  return `${urlLink}\n\`${bar}\` ${clock} ${label}`
+  return `[🔨  ${urlShort}](${url})\n\`${bar}\` ${clock} ${label}`
 }
 
 // Poll container /health in background; update Telegram message with progress bar,
