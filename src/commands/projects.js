@@ -1241,13 +1241,9 @@ function buildProgressText(name, url, phase, userInput, tick) {
   const bar = '▓'.repeat(n) + '░'.repeat(10 - n)
   const clock = CLOCK[(tick || 0) % CLOCK.length]
   const label = PHASE_LABEL[phase] || 'Working'
-  // URL displayed inline next to the hammer — escape for MarkdownV2 link text
   const urlShort = mdv2(url.replace(/^https?:\/\//, ''))
-  const urlLink = `[🔗 ${urlShort}](${url})`
-  if (userInput) {
-    return `🔨 *${mdv2(name)}* — _"${mdv2(userInput.slice(0, 45))}"_ ${urlLink}\n\`${bar}\` ${clock} ${label}`
-  }
-  return `🔨 *${mdv2(name)}* ${urlLink}\n\`${bar}\` ${clock} ${label}`
+  const urlLink = `[🔨  ${urlShort}](${url})`
+  return `${urlLink}\n\`${bar}\` ${clock} ${label}`
 }
 
 // Poll container /health in background; update Telegram message with progress bar,
